@@ -232,6 +232,5 @@ async def handle_request(event):
 ### 参考链接
 
 - [ErisPulse 主库](https://github.com/ErisPulse/ErisPulse/)
-- [花枫咖啡馆官方API文档](APIDocs.md)
+- [花枫咖啡馆](https://cofe.allons-y.uk/)
 - [OneBot12协议对照](CoverToOnebot12.md)
-- [模块开发指南](https://github.com/ErisPulse/ErisPulse/tree/main/docs/DEVELOPMENT.md)
