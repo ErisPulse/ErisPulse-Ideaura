@@ -1,0 +1,24 @@
+[project]
+name = "ErisPulse-Ideaura"
+version = "0.1.0"
+description = "ErisPulse的Ideaura平台适配器"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [ { name = "ErisPulse" } ]
+dependencies = [
+    "aiohttp",
+]
+
+[project.urls]
+"homepage" = "https://github.com/ErisPulse/ErisPulse-Ideaura"
+
+[project.entry-points."erispulse.adapter"]
+ideaura = "IdeauraAdapter:IdeauraAdapter"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["IdeauraAdapter"]
