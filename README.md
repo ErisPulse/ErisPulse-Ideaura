@@ -97,21 +97,25 @@ await ideaura.Send.To("group", "chatroom").Reply("1001").At("456").Text("回复�
 
 ```toml
 [IdeauraAdapter.accounts.default]
-email = ""            # 登录邮箱（必填，请修改为实际邮箱）
-password = ""         # 登录密码（必填，请修改为实际密码）
-enabled = false       # 是否启用（填写完账号密码后改为true）
+token = ""             # 登录Token（选填，填写后优先使用Token登录）
+email = ""            # 登录邮箱（Token登录时可不填，邮箱密码登录时必填）
+password = ""         # 登录密码（Token登录时可不填，邮箱密码登录时必填）
+enabled = false       # 是否启用（填写完认证信息后改为true）
 ```
+
+> 支持两种登录方式（二选一）：
+> - **Token 登录**：只填 `token`，无需邮箱密码
+> - **邮箱密码登录**：填 `email` + `password`
 
 #### 多账户配置示例
 
 ```toml
-# 账户1
+# 账户1：Token 登录
 [IdeauraAdapter.accounts.bot1]
-email = "bot1@example.com"
-password = "password1"
+token = "your-token-here"
 enabled = true
 
-# 账户2
+# 账户2：邮箱密码登录
 [IdeauraAdapter.accounts.bot2]
 email = "bot2@example.com"
 password = "password2"
@@ -125,8 +129,9 @@ heartbeat_interval = 30
 ```
 
 **配置项说明：**
-- `email`：账户登录邮箱（必填）
-- `password`：账户登录密码（必填）
+- `token`：登录Token（选填，填写后优先使用Token登录，无需邮箱密码）
+- `email`：账户登录邮箱（Token登录时可不填，邮箱密码登录时必填）
+- `password`：账户登录密码（Token登录时可不填，邮箱密码登录时必填）
 - `enabled`：是否启用该账户（可选，默认为true）
 
 **全局配置项：**

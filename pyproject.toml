@@ -1,14 +1,12 @@
 [project]
 name = "ErisPulse-Ideaura"
-version = "0.1.0"
+version = "4.0.0"
 description = "ErisPulse的Ideaura平台适配器"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [ { name = "ErisPulse" } ]
-dependencies = [
-    "aiohttp",
-]
+dependencies = []
 
 [project.urls]
 "homepage" = "https://github.com/ErisPulse/ErisPulse-Ideaura"

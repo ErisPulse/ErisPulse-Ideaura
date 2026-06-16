@@ -1,30 +1,91 @@
 import asyncio
-import aiohttp
 import io
 import json
 import os
-import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
-from ErisPulse import sdk
-from ErisPulse.Core import router
+
+from ErisPulse.Core import client, router
+from ErisPulse.Core.Bases.adapter import BaseAdapter
+from ErisPulse.Core.Bases.websocket import WSMessage
+from ErisPulse.runtime.config_schema import (
+    BotAccountConfig,
+    AdapterConfig,
+    dict_to_dataclass,
+)
+from ErisPulse.Core.config import config as config_mgr
 from ErisPulse.Core.Event import register_event_mixin, unregister_platform_event_methods
 
 
 @dataclass
-class IdeauraAccountConfig:
-    email: str
-    password: str
-    enabled: bool = True
-    name: str = ""
-    token: str = ""
-    user_id: str = ""
-    username: str = ""
-    avatar_url: str = ""
-    inbox_topic: str = ""
-    ws_session: Optional[aiohttp.ClientWebSocketResponse] = None
-    heartbeat_task: Optional[asyncio.Task] = None
-    receive_task: Optional[asyncio.Task] = None
+class IdeauraConfig(AdapterConfig):
+    base_url: str = field(
+        default="https://api-cofe.allons-y.uk:3009",
+        metadata={
+            "description": "Ideaura API 基础地址",
+            "required": False,
+            "webui": {"widget": "text", "group": "connection", "order": 1},
+        },
+    )
+    ws_url: str = field(
+        default="wss://api-cofe.allons-y.uk:3009/mqtt",
+        metadata={
+            "description": "Ideaura WebSocket 地址",
+            "required": False,
+            "webui": {"widget": "text", "group": "connection", "order": 2},
+        },
+    )
+    heartbeat_interval: int = field(
+        default=30,
+        metadata={
+            "description": "心跳间隔（秒）",
+            "required": False,
+            "webui": {"widget": "number", "group": "advanced", "order": 3},
+        },
+    )
+    reconnect_delay: int = field(
+        default=5,
+        metadata={
+            "description": "重连延迟（秒）",
+            "required": False,
+            "webui": {"widget": "number", "group": "advanced", "order": 4},
+        },
+    )
+
+
+@dataclass
+class IdeauraAccountConfig(BotAccountConfig):
+    token: str = field(
+        default="",
+        metadata={
+            "description": "登录Token（填写后优先使用Token登录，无需邮箱密码）",
+            "required": False,
+            "secret": True,
+            "webui": {"widget": "password", "group": "token", "order": 1},
+        },
+    )
+    email: str = field(
+        default="",
+        metadata={
+            "description": "账号邮箱（Token登录时可不填）",
+            "required": False,
+            "secret": True,
+            "webui": {"widget": "text", "group": "basic", "order": 2},
+        },
+    )
+    password: str = field(
+        default="",
+        metadata={
+            "description": "账号密码（Token登录时可不填）",
+            "required": False,
+            "secret": True,
+            "webui": {"widget": "password", "group": "basic", "order": 3},
+        },
+    )
+
+    def has_valid_auth(self) -> bool:
+        """账户是否提供了有效的认证信息（Token 或 邮箱密码二选一）"""
+        return bool(self.token) or (bool(self.email) and bool(self.password))
 
 
 class IdeauraEventMixin:
@@ -53,30 +114,15 @@ class IdeauraEventMixin:
         return self.get("ideaura_is_self", False)
 
 
-class IdeauraAdapter(sdk.BaseAdapter):
+class IdeauraAdapter(BaseAdapter):
 
-    class Send(sdk.BaseAdapter.Send):
+    AccountConfigClass = IdeauraAccountConfig
+    ConfigClass = IdeauraConfig
+
+    class Send(BaseAdapter.Send):
 
         def __init__(self, adapter, target_type=None, target_id=None, account_id=None):
             super().__init__(adapter, target_type, target_id, account_id)
-            self._at_user_ids = []
-            self._reply_message_id = None
-
-        def At(self, user_id: str, name: str = None) -> "Send":
-            self._at_user_ids.append({"type": "user", "id": str(user_id)})
-            return self
-
-        def AtAll(self) -> "Send":
-            self._at_user_ids.append({"type": "all"})
-            return self
-
-        def Reply(self, message_id: str) -> "Send":
-            self._reply_message_id = str(message_id)
-            return self
-
-        def _reset_modifiers(self):
-            self._at_user_ids = []
-            self._reply_message_id = None
 
         def Text(self, text: str):
             return self.Raw_ob12([{"type": "text", "data": {"text": text}}])
@@ -103,10 +149,11 @@ class IdeauraAdapter(sdk.BaseAdapter):
             return self.Raw_ob12([{"type": "ideaura_html", "data": {"html": html}}])
 
         def Edit(self, message_id: str, text: str, content_type: str = "text"):
+            ctx = self.send_context
             return asyncio.create_task(
                 self._adapter.call_api(
                     "edit_message",
-                    _account_id=self._account_id,
+                    _account_id=ctx.get("account_id"),
                     messageId=str(message_id),
                     newContent=text,
                     newSubtype=content_type,
@@ -114,10 +161,11 @@ class IdeauraAdapter(sdk.BaseAdapter):
             )
 
         def Recall(self, message_id: str):
+            ctx = self.send_context
             return asyncio.create_task(
                 self._adapter.call_api(
                     "delete_message",
-                    _account_id=self._account_id,
+                    _account_id=ctx.get("account_id"),
                     messageId=str(message_id),
                 )
             )
@@ -147,7 +195,6 @@ class IdeauraAdapter(sdk.BaseAdapter):
                     result = await self._send_segment(segment)
                     if result:
                         results.append(result)
-                self._reset_modifiers()
                 return results[-1] if results else None
 
             return asyncio.create_task(_send())
@@ -168,63 +215,54 @@ class IdeauraAdapter(sdk.BaseAdapter):
                     self._at_user_ids.append({"type": "user", "id": uid})
                 return None
 
-            account = self._resolve_account()
+            ctx = self.send_context
+            account_name, account = self._adapter._resolve_account(ctx.get("account_id"))
             if not account:
                 raise ValueError("No available account")
 
             if seg_type == "text":
-                return await self._send_text(seg_data.get("text", ""), account)
+                return await self._send_text(seg_data.get("text", ""), account_name, account)
             elif seg_type == "image":
-                return await self._send_media(seg_data, "image", account)
+                return await self._send_media(seg_data, "image", account_name, account)
             elif seg_type == "video":
-                return await self._send_media(seg_data, "video", account)
+                return await self._send_media(seg_data, "video", account_name, account)
             elif seg_type == "file":
-                return await self._send_media(seg_data, "file", account)
+                return await self._send_media(seg_data, "file", account_name, account)
             elif seg_type == "ideaura_markdown":
-                return await self._send_text(seg_data.get("markdown", ""), account, subtype="markdown")
+                return await self._send_text(seg_data.get("markdown", ""), account_name, account, subtype="markdown")
             elif seg_type == "ideaura_html":
-                return await self._send_text(seg_data.get("html", ""), account, subtype="html")
+                return await self._send_text(seg_data.get("html", ""), account_name, account, subtype="html")
             else:
                 text = str(seg_data)
-                return await self._send_text(text, account)
+                return await self._send_text(text, account_name, account)
 
-        def _resolve_account(self) -> Optional[IdeauraAccountConfig]:
-            adapter = self._adapter
-            if self._account_id:
-                if self._account_id in adapter.accounts:
-                    account = adapter.accounts[self._account_id]
-                    if account.enabled:
-                        return account
-                for name, acc in adapter.accounts.items():
-                    if acc.user_id == self._account_id and acc.enabled:
-                        return acc
-            enabled = [a for a in adapter.accounts.values() if a.enabled]
-            return enabled[0] if enabled else None
-
-        def _build_endpoint_and_base_payload(self, account: IdeauraAccountConfig) -> tuple:
-            if self._target_type == "user":
+        def _build_endpoint_and_base_payload(self, account_name: str) -> tuple:
+            ctx = self.send_context
+            target_type = ctx.get("target_type")
+            target_id = ctx.get("target_id")
+            if target_type == "user":
                 endpoint = "/api/chat/private-messages"
-                payload = {"receiverId": self._target_id}
+                payload = {"receiverId": target_id}
             else:
                 endpoint = "/api/chat/messages"
                 payload = {}
-                if self._target_id == "chatroom":
+                if target_id == "chatroom":
                     pass
                 else:
-                    payload["topicId"] = self._target_id
+                    payload["topicId"] = target_id
             if self._at_user_ids:
                 payload["mentions"] = list(self._at_user_ids)
             if self._reply_message_id:
                 payload["quotedMessageId"] = self._reply_message_id
             return endpoint, payload
 
-        async def _send_text(self, text: str, account: IdeauraAccountConfig, subtype: str = "text") -> Dict:
-            endpoint, payload = self._build_endpoint_and_base_payload(account)
+        async def _send_text(self, text: str, account_name: str, account: IdeauraAccountConfig, subtype: str = "text") -> Dict:
+            endpoint, payload = self._build_endpoint_and_base_payload(account_name)
             payload["content"] = text
             payload["messageSubtype"] = subtype
-            return await self._adapter._http_post(endpoint, account, payload)
+            return await self._adapter._http_post(endpoint, account_name, account, payload)
 
-        async def _send_media(self, seg_data: Dict, media_type: str, account: IdeauraAccountConfig) -> Dict:
+        async def _send_media(self, seg_data: Dict, media_type: str, account_name: str, account: IdeauraAccountConfig) -> Dict:
             file = seg_data.get("file")
             filename = seg_data.get("filename")
 
@@ -234,12 +272,12 @@ class IdeauraAdapter(sdk.BaseAdapter):
 
             resolved_name = self._resolve_filename(file_bytes, resolved_name, media_type)
 
-            endpoint, payload = self._build_endpoint_and_base_payload(account)
+            endpoint, payload = self._build_endpoint_and_base_payload(account_name)
             payload["content"] = ""
             payload["messageSubtype"] = media_type
 
             return await self._adapter._http_upload_and_send(
-                endpoint, account, file_bytes, resolved_name, payload
+                endpoint, account_name, account, file_bytes, resolved_name, payload
             )
 
         def _resolve_filename(self, file_bytes: bytes, filename: str, media_type: str) -> str:
@@ -318,271 +356,262 @@ class IdeauraAdapter(sdk.BaseAdapter):
 
             return None, None
 
-    def __init__(self, sdk):
-        self.sdk = sdk
-        self.logger = sdk.logger
-        self.adapter = sdk.adapter
-
-        self.base_url = "https://api-cofe.allons-y.uk:3009"
-        self.ws_url = "wss://api-cofe.allons-y.uk:3009/mqtt"
-        self.heartbeat_interval = 30
-        self.reconnect_delay = 5
+    def __init__(self, sdk_ref=None):
+        super().__init__(sdk_ref)
         self._running = False
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.accounts: Dict[str, IdeauraAccountConfig] = self._load_accounts_config()
-
-        super().__init__()
-
+        # 每个账户的运行时状态（登录后获得，不属于配置）
+        # _runtime_state[name] = {token, user_id, username, avatar_url, inbox_topic,
+        #                         ws_session, heartbeat_task, receive_task}
+        self._runtime_state: Dict[str, dict] = {}
         self.convert = self._setup_converter()
+
+    def _get_config_key(self) -> str:
+        return "IdeauraAdapter"
+
+    def _load_accounts(self) -> dict:
+        key = "IdeauraAdapter.accounts"
+        data = config_mgr.getConfig(key)
+
+        if not data:
+            self.logger.info("未找到 IdeauraAdapter 账户配置，创建默认配置")
+            data = {
+                "default": {
+                    "token": "",
+                    "email": "",
+                    "password": "",
+                    "enabled": True,
+                }
+            }
+            try:
+                config_mgr.setConfig(key, data)
+            except Exception as e:
+                self.logger.error(f"保存默认配置失败: {e}")
+
+        accounts = {}
+        for name, account_data in data.items():
+            if not isinstance(account_data, dict):
+                continue
+
+            instance = dict_to_dataclass(IdeauraAccountConfig, account_data)
+            instance.name = name
+
+            if not instance.has_valid_auth():
+                self.logger.warning(
+                    f"账户 '{name}' 缺少有效认证信息（需提供 token 或 email+password），已跳过"
+                )
+                continue
+
+            accounts[name] = instance
+
+        self.logger.info(f"IdeauraAdapter 初始化完成，共加载 {len(accounts)} 个账户")
+        return accounts
+
+    def _get_global_config(self) -> IdeauraConfig:
+        data = config_mgr.getConfig("IdeauraAdapter") or {}
+        return dict_to_dataclass(IdeauraConfig, data)
 
     def _setup_converter(self):
         from .Converter import IdeauraConverter
         converter = IdeauraConverter()
         return converter.convert
 
-    def _load_accounts_config(self) -> Dict[str, IdeauraAccountConfig]:
-        accounts = {}
-        account_configs = self.sdk.config.getConfig("IdeauraAdapter.accounts", {})
-
-        if not account_configs:
-            self.logger.info("No IdeauraAdapter config found, creating default")
-            default_config = {
-                "default": {
-                    "email": "",
-                    "password": "",
-                    "enabled": False,
-                }
-            }
-            try:
-                self.sdk.config.setConfig("IdeauraAdapter.accounts", default_config)
-            except Exception as e:
-                self.logger.error(f"Failed to save default config: {e}")
-            account_configs = default_config
-
-        base_url = self.sdk.config.getConfig("IdeauraAdapter.base_url", self.base_url)
-        if base_url:
-            self.base_url = base_url
-        ws_url = self.sdk.config.getConfig("IdeauraAdapter.ws_url", self.ws_url)
-        if ws_url:
-            self.ws_url = ws_url
-        hb = self.sdk.config.getConfig("IdeauraAdapter.heartbeat_interval")
-        if hb is not None:
-            self.heartbeat_interval = int(hb)
-
-        for name, config in account_configs.items():
-            if not isinstance(config, dict):
-                continue
-            email = config.get("email", "")
-            password = config.get("password", "")
-            if not email or not password:
-                self.logger.warning(f"Account '{name}' missing email/password, skipped")
-                continue
-
-            accounts[name] = IdeauraAccountConfig(
-                email=email,
-                password=password,
-                enabled=config.get("enabled", True),
-                name=name,
-            )
-
-        self.logger.info(f"IdeauraAdapter initialized with {len(accounts)} account(s)")
-        return accounts
+    def _get_state(self, name: str) -> dict:
+        if name not in self._runtime_state:
+            self._runtime_state[name] = {}
+        return self._runtime_state[name]
 
     async def start(self):
-        if not self.session:
-            timeout = aiohttp.ClientTimeout(total=300, connect=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
-
         register_event_mixin("ideaura", IdeauraEventMixin)
 
         self._running = True
-        enabled_accounts = {n: a for n, a in self.accounts.items() if a.enabled}
-
-        if not enabled_accounts:
-            self.logger.warning("No enabled accounts, adapter started but idle")
+        if not self.enabled_accounts:
+            self.logger.warning("没有已启用的账户，适配器将以空闲状态启动")
             return
 
-        for name, account in enabled_accounts.items():
+        for name, account in self.enabled_accounts.items():
             asyncio.create_task(self._start_account(name, account))
 
-        self.logger.info(f"IdeauraAdapter started with {len(enabled_accounts)} account(s)")
+        self.logger.info(f"IdeauraAdapter 已启动，共 {len(self.enabled_accounts)} 个账户")
 
     async def _start_account(self, name: str, account: IdeauraAccountConfig):
         try:
-            await self._login(account)
-            await self._get_user_info(account)
-            await self._get_inbox_topic(account)
+            await self._login(name, account)
+            await self._get_user_info(name, account)
+            await self._get_inbox_topic(name, account)
 
-            await self.adapter.emit({
-                "type": "meta",
-                "detail_type": "connect",
-                "platform": "ideaura",
-                "self": {
-                    "platform": "ideaura",
-                    "user_id": account.user_id,
-                    "user_name": account.username,
-                    "nickname": account.username,
-                    "avatar": account.avatar_url,
-                    "account_id": name,
-                },
-            })
+            state = self._get_state(name)
+            await self.emit_meta("connect", state.get("user_id", ""))
 
             await self._connect_websocket(name, account)
         except Exception as e:
-            self.logger.error(f"Account '{name}' start failed: {e}")
+            self.logger.error(f"账户 '{name}' 启动失败: {e}")
 
-    async def _login(self, account: IdeauraAccountConfig):
-        url = f"{self.base_url}/api/auth/login"
+    async def _login(self, name: str, account: IdeauraAccountConfig):
+        state = self._get_state(name)
+
+        # Token 登录：直接使用配置的 token，无需调用登录接口
+        if account.token:
+            state["token"] = account.token
+            self.logger.info(f"账户 {name} 使用 Token 登录")
+            return
+
+        # 邮箱密码登录
+        cfg = self._get_global_config()
+        url = f"{cfg.base_url}/api/auth/login"
         payload = {
             "email": account.email,
             "password": account.password,
         }
 
-        async with self.session.post(url, json=payload) as resp:
-            data = await resp.json()
+        resp = await client.post(url, json=payload)
+        data = await resp.json()
 
         token = data.get("token") or data.get("data", {}).get("token")
         if not token:
             raise ValueError(f"Login failed for {account.email}: {data}")
 
-        account.token = token
+        state["token"] = token
 
         user_data = data.get("data", {}).get("user", data.get("data", {}))
         if not user_data:
             user_data = data
-        account.user_id = str(user_data.get("id", data.get("userId", "")))
+        state["user_id"] = str(user_data.get("id", data.get("userId", "")))
 
-        self.logger.info(f"Account {account.name} logged in (user_id={account.user_id})")
+        self.logger.info(f"账户 {name} 登录成功 (user_id={state['user_id']})")
 
-    async def _get_user_info(self, account: IdeauraAccountConfig):
-        if account.username:
+    async def _get_user_info(self, name: str, account: IdeauraAccountConfig):
+        state = self._get_state(name)
+        if state.get("username"):
             return
-        url = f"{self.base_url}/api/users/me"
-        headers = {"Authorization": f"Bearer {account.token}"}
+
+        cfg = self._get_global_config()
+        url = f"{cfg.base_url}/api/users/me"
+        headers = {"Authorization": f"Bearer {state.get('token', '')}"}
 
         try:
-            async with self.session.get(url, headers=headers) as resp:
-                data = await resp.json()
+            resp = await client.get(url, headers=headers)
+            data = await resp.json()
             if data.get("success"):
                 user_data = data.get("data", {})
-                account.username = user_data.get("username", "")
-                account.avatar_url = user_data.get("avatarUrl", "")
+                state["username"] = user_data.get("username", "")
+                state["avatar_url"] = user_data.get("avatarUrl", "")
         except Exception as e:
-            self.logger.debug(f"Failed to get user info for {account.name}: {e}")
+            self.logger.debug(f"获取账户 {name} 用户信息失败: {e}")
 
-    async def _get_inbox_topic(self, account: IdeauraAccountConfig):
-        url = f"{self.base_url}/api/chat/user-inbox-topic"
-        headers = {"Authorization": f"Bearer {account.token}"}
+    async def _get_inbox_topic(self, name: str, account: IdeauraAccountConfig):
+        state = self._get_state(name)
+        cfg = self._get_global_config()
+        url = f"{cfg.base_url}/api/chat/user-inbox-topic"
+        headers = {"Authorization": f"Bearer {state.get('token', '')}"}
 
-        async with self.session.get(url, headers=headers) as resp:
-            data = await resp.json()
+        resp = await client.get(url, headers=headers)
+        data = await resp.json()
 
         resp_data = data.get("data", {})
         topic = resp_data.get("inboxTopic") or resp_data.get("topic") or data.get("topic")
         if not topic:
-            raise ValueError(f"Failed to get inbox topic for {account.name}: {data}")
+            raise ValueError(f"Failed to get inbox topic for {name}: {data}")
 
-        account.inbox_topic = topic
+        state["inbox_topic"] = topic
 
-        if resp_data.get("userId") and not account.user_id:
-            account.user_id = str(resp_data["userId"])
+        if resp_data.get("userId") and not state.get("user_id"):
+            state["user_id"] = str(resp_data["userId"])
 
-        self.logger.debug(f"Account {account.name} inbox topic: {topic}")
+        self.logger.debug(f"账户 {name} inbox topic: {topic}")
 
     async def _connect_websocket(self, name: str, account: IdeauraAccountConfig):
+        cfg = self._get_global_config()
+        state = self._get_state(name)
+
         while self._running:
             try:
-                async with self.session.ws_connect(self.ws_url) as ws:
-                    account.ws_session = ws
+                ws = await client.ws_connect(cfg.ws_url)
+                state["ws_session"] = ws
 
-                    await ws.send_json({"type": "connect", "token": account.token})
+                await ws.send_json({"type": "connect", "token": state.get("token", "")})
 
-                    msg = await ws.receive(timeout=30)
-                    if msg.type != aiohttp.WSMsgType.TEXT:
-                        raise ValueError(f"Unexpected WS message type: {msg.type}")
+                msg = await asyncio.wait_for(ws.receive(), timeout=30)
+                if msg.type != WSMessage.TEXT:
+                    raise ValueError(f"Unexpected WS message type: {msg.type}")
 
-                    connack = json.loads(msg.data)
-                    if connack.get("type") != "connack":
-                        raise ValueError(f"Expected connack, got: {connack}")
+                connack = json.loads(msg.data)
+                if connack.get("type") != "connack":
+                    raise ValueError(f"Expected connack, got: {connack}")
 
-                    await ws.send_json({
-                        "type": "subscribe",
-                        "topics": [account.inbox_topic],
-                    })
+                await ws.send_json({
+                    "type": "subscribe",
+                    "topics": [state.get("inbox_topic")],
+                })
 
-                    sub_msg = await ws.receive(timeout=30)
-                    if sub_msg.type == aiohttp.WSMsgType.TEXT:
-                        suback = json.loads(sub_msg.data)
-                        self.logger.debug(f"Account {name} subscribe response: {suback}")
+                sub_msg = await asyncio.wait_for(ws.receive(), timeout=30)
+                if sub_msg.type == WSMessage.TEXT:
+                    suback = json.loads(sub_msg.data)
+                    self.logger.debug(f"账户 {name} subscribe 响应: {suback}")
 
-                    account.heartbeat_task = asyncio.create_task(
-                        self._heartbeat_loop(name, account, ws)
-                    )
-                    account.receive_task = asyncio.create_task(
-                        self._receive_loop(name, account, ws)
-                    )
+                state["heartbeat_task"] = asyncio.create_task(
+                    self._heartbeat_loop(name, ws)
+                )
+                state["receive_task"] = asyncio.create_task(
+                    self._receive_loop(name, ws)
+                )
 
-                    await account.receive_task
+                await state["receive_task"]
 
-                    if account.heartbeat_task and not account.heartbeat_task.done():
-                        account.heartbeat_task.cancel()
+                if state.get("heartbeat_task") and not state["heartbeat_task"].done():
+                    state["heartbeat_task"].cancel()
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Account {name} WS error: {e}")
+                self.logger.error(f"账户 {name} WS 错误: {e}")
 
-            account.ws_session = None
+            state["ws_session"] = None
             if self._running:
-                self.logger.info(f"Account {name} reconnecting in {self.reconnect_delay}s...")
-                await asyncio.sleep(self.reconnect_delay)
+                self.logger.info(f"账户 {name} 将在 {cfg.reconnect_delay}s 后重连...")
+                await asyncio.sleep(cfg.reconnect_delay)
 
-    async def _heartbeat_loop(self, name: str, account: IdeauraAccountConfig, ws):
+    async def _heartbeat_loop(self, name: str, ws):
+        cfg = self._get_global_config()
+        state = self._get_state(name)
         try:
             while True:
-                await asyncio.sleep(self.heartbeat_interval)
+                await asyncio.sleep(cfg.heartbeat_interval)
                 await ws.send_json({"type": "pingreq"})
 
-                await self.adapter.emit({
-                    "type": "meta",
-                    "detail_type": "heartbeat",
-                    "platform": "ideaura",
-                    "self": {
-                        "platform": "ideaura",
-                        "user_id": account.user_id,
-                        "account_id": name,
-                    },
-                })
+                await self.emit_meta("heartbeat", state.get("user_id", ""))
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            self.logger.debug(f"Account {name} heartbeat stopped: {e}")
+            self.logger.debug(f"账户 {name} 心跳停止: {e}")
 
-    async def _receive_loop(self, name: str, account: IdeauraAccountConfig, ws):
+    async def _receive_loop(self, name: str, ws):
+        state = self._get_state(name)
         try:
-            async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
+            while True:
+                msg = await ws.receive()
+                if msg.type == WSMessage.TEXT:
                     try:
                         data = json.loads(msg.data)
-                        await self._handle_ws_message(name, account, data)
+                        await self._handle_ws_message(name, data)
                     except json.JSONDecodeError:
-                        self.logger.warning(f"Account {name} invalid JSON from WS")
+                        self.logger.warning(f"账户 {name} 收到无效的 JSON 数据")
                     except Exception as e:
-                        self.logger.error(f"Account {name} message handling error: {e}")
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        self.logger.error(f"账户 {name} 消息处理错误: {e}")
+                elif msg.type in (WSMessage.CLOSE, WSMessage.ERROR):
                     break
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            self.logger.error(f"Account {name} receive loop error: {e}")
+            self.logger.error(f"账户 {name} 接收循环错误: {e}")
 
-    async def _handle_ws_message(self, name: str, account: IdeauraAccountConfig, data: Dict):
+    async def _handle_ws_message(self, name: str, data: Dict):
+        state = self._get_state(name)
         msg_type = data.get("type", "")
 
         if msg_type == "pingresp":
             return
 
-        self.logger.debug(f"Account {name} WS message: {json.dumps(data, ensure_ascii=False)[:500]}")
+        self.logger.debug(f"账户 {name} WS 消息: {json.dumps(data, ensure_ascii=False)[:500]}")
 
         if msg_type == "publish":
             payload_raw = data.get("payload", {})
@@ -590,91 +619,81 @@ class IdeauraAdapter(sdk.BaseAdapter):
                 try:
                     payload_raw = json.loads(payload_raw)
                 except json.JSONDecodeError:
-                    self.logger.warning(f"Account {name} invalid publish payload")
+                    self.logger.warning(f"账户 {name} 无效的 publish payload")
                     return
 
-            event = self.convert(payload_raw, account.user_id)
+            event = self.convert(payload_raw, state.get("user_id", ""))
             if event:
-                self.logger.debug(f"Account {name} event: {json.dumps(event, ensure_ascii=False)[:500]}")
-                await self.adapter.emit(event)
+                self.logger.debug(f"账户 {name} 事件: {json.dumps(event, ensure_ascii=False)[:500]}")
+                from ErisPulse.Core import adapter as adapter_mgr
+                await adapter_mgr.emit(event)
         elif msg_type in ("connack", "suback"):
             pass
         else:
-            self.logger.debug(f"Account {name} unhandled WS message type: {msg_type}")
+            self.logger.debug(f"账户 {name} 未处理的 WS 消息类型: {msg_type}")
 
     async def shutdown(self):
         self._running = False
 
-        for name, account in self.accounts.items():
-            if account.enabled:
+        for name in list(self._runtime_state.keys()):
+            state = self._runtime_state[name]
+            try:
+                await self.emit_meta("disconnect", state.get("user_id", ""))
+            except Exception:
+                pass
+
+            if state.get("heartbeat_task") and not state["heartbeat_task"].done():
+                state["heartbeat_task"].cancel()
+            if state.get("receive_task") and not state["receive_task"].done():
+                state["receive_task"].cancel()
+            if state.get("ws_session") and not state["ws_session"].closed:
                 try:
-                    await self.adapter.emit({
-                        "type": "meta",
-                        "detail_type": "disconnect",
-                        "platform": "ideaura",
-                        "self": {
-                            "platform": "ideaura",
-                            "user_id": account.user_id,
-                            "account_id": name,
-                        },
-                    })
+                    await state["ws_session"].close()
                 except Exception:
                     pass
 
-                if account.heartbeat_task and not account.heartbeat_task.done():
-                    account.heartbeat_task.cancel()
-                if account.receive_task and not account.receive_task.done():
-                    account.receive_task.cancel()
-                if account.ws_session and not account.ws_session.closed:
-                    await account.ws_session.close()
+        try:
+            unregister_platform_event_methods("ideaura")
+        except Exception:
+            pass
 
-        unregister_platform_event_methods("ideaura")
-
-        if self.session:
-            await self.session.close()
-            self.session = None
-
-        self.logger.info("IdeauraAdapter shutdown complete")
+        self.logger.info("IdeauraAdapter 已关闭")
 
     async def call_api(self, endpoint: str, _account_id: str = None, **params):
-        account = self._resolve_account_for_api(_account_id)
+        account_name, account = self._resolve_account(_account_id)
+        echo = params.pop("echo", None)
 
-        if endpoint == "edit_message":
-            return await self._api_edit_message(account, **params)
-        elif endpoint == "delete_message":
-            return await self._api_delete_message(account, **params)
+        try:
+            if endpoint == "edit_message":
+                result = await self._api_edit_message(account_name, account, **params)
+            elif endpoint == "delete_message":
+                result = await self._api_delete_message(account_name, account, **params)
+            else:
+                api_path = endpoint if endpoint.startswith("/api/") else f"/api/{endpoint}"
+                result = await self._http_request("POST", api_path, account_name, account, params)
 
-        api_path = endpoint if endpoint.startswith("/api/") else f"/api/{endpoint}"
-        return await self._http_request("POST", api_path, account, params)
+            if echo is not None:
+                result["echo"] = echo
+            return result
+        except Exception as e:
+            err = self.make_error(retcode=33001, message=str(e), raw=None)
+            if echo is not None:
+                err["echo"] = echo
+            return err
 
-    def _resolve_account_for_api(self, _account_id: str = None) -> IdeauraAccountConfig:
-        if _account_id:
-            if _account_id in self.accounts:
-                account = self.accounts[_account_id]
-                if account.enabled:
-                    return account
-            for name, acc in self.accounts.items():
-                if acc.user_id == _account_id and acc.enabled:
-                    return acc
-
-        enabled = [a for a in self.accounts.values() if a.enabled]
-        if not enabled:
-            raise ValueError("No enabled accounts")
-        return enabled[0]
-
-    async def _api_edit_message(self, account: IdeauraAccountConfig, **params) -> Dict:
+    async def _api_edit_message(self, account_name: str, account: IdeauraAccountConfig, **params) -> Dict:
         message_id = str(params.get("messageId", ""))
         new_content = params.get("newContent", "")
-        new_subtype = params.get("newSubtype", "text")
 
         return await self._http_request(
             "PUT",
             f"/api/chat/messages/{message_id}",
+            account_name,
             account,
             {"content": new_content, "isPrivate": "false"},
         )
 
-    async def _api_delete_message(self, account: IdeauraAccountConfig, **params) -> Dict:
+    async def _api_delete_message(self, account_name: str, account: IdeauraAccountConfig, **params) -> Dict:
         message_id = str(params.get("messageId", ""))
         query_parts = []
         is_private = params.get("isPrivate")
@@ -688,43 +707,40 @@ class IdeauraAdapter(sdk.BaseAdapter):
         return await self._http_request(
             "DELETE",
             f"/api/chat/messages/{message_id}{qs}",
+            account_name,
             account,
             None,
         )
 
-    def _ensure_session(self):
-        if not self.session:
-            timeout = aiohttp.ClientTimeout(total=300, connect=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
-
-    async def _http_post(self, endpoint: str, account: IdeauraAccountConfig, data: Dict) -> Dict:
-        self._ensure_session()
-
-        url = f"{self.base_url}{endpoint}"
+    async def _http_post(self, endpoint: str, account_name: str, account: IdeauraAccountConfig, data: Dict) -> Dict:
+        cfg = self._get_global_config()
+        state = self._get_state(account_name)
+        url = f"{cfg.base_url}{endpoint}"
         headers = {
-            "Authorization": f"Bearer {account.token}",
+            "Authorization": f"Bearer {state.get('token', '')}",
             "Content-Type": "application/json",
         }
 
-        self.logger.debug(f"Account {account.name} POST {endpoint}: {json.dumps(data, ensure_ascii=False)[:500]}")
+        self.logger.debug(f"账户 {account_name} POST {endpoint}: {json.dumps(data, ensure_ascii=False)[:500]}")
 
         try:
-            async with self.session.post(url, json=data, headers=headers) as resp:
-                raw = await self._parse_response(resp)
-                return self._standardize_response(raw, account)
-
-        except aiohttp.ClientError as e:
-            self.logger.error(f"HTTP POST failed {endpoint}: {e}")
-            return self._error_response(str(e), 33000)
+            resp = await client.post(url, json=data, headers=headers)
+            raw = await self._parse_response(resp)
+            return self._standardize_response(raw, account_name)
+        except Exception as e:
+            self.logger.error(f"HTTP POST 失败 {endpoint}: {e}")
+            return self.make_error(retcode=33000, message=str(e), raw=None)
 
     async def _http_upload_and_send(
-        self, endpoint: str, account: IdeauraAccountConfig,
+        self, endpoint: str, account_name: str, account: IdeauraAccountConfig,
         file_bytes: bytes, filename: str, payload: Dict
     ) -> Dict:
-        self._ensure_session()
+        import aiohttp
 
-        url = f"{self.base_url}{endpoint}"
-        headers = {"Authorization": f"Bearer {account.token}"}
+        cfg = self._get_global_config()
+        state = self._get_state(account_name)
+        url = f"{cfg.base_url}{endpoint}"
+        headers = {"Authorization": f"Bearer {state.get('token', '')}"}
 
         content_type = self._guess_content_type(filename)
         form = aiohttp.FormData()
@@ -736,167 +752,160 @@ class IdeauraAdapter(sdk.BaseAdapter):
             else:
                 form.add_field(key, str(value))
 
-        self.logger.debug(f"Account {account.name} POST (multipart+file) {endpoint} file={filename}")
+        self.logger.debug(f"账户 {account_name} POST (multipart+file) {endpoint} file={filename}")
 
         try:
-            async with self.session.post(url, data=form, headers=headers) as resp:
-                raw = await self._parse_response(resp)
-                return self._standardize_response(raw, account)
-        except aiohttp.ClientError as e:
-            self.logger.error(f"HTTP upload+send failed {endpoint}: {e}")
-            return self._error_response(str(e), 33000)
+            resp = await client.post(url, data=form, headers=headers, timeout=300)
+            raw = await self._parse_response(resp)
+            return self._standardize_response(raw, account_name)
+        except Exception as e:
+            self.logger.error(f"HTTP upload+send 失败 {endpoint}: {e}")
+            return self.make_error(retcode=33000, message=str(e), raw=None)
 
-    async def _http_request(self, method: str, endpoint: str, account: IdeauraAccountConfig, params: Dict = None) -> Dict:
-        self._ensure_session()
-
-        url = f"{self.base_url}{endpoint}"
+    async def _http_request(self, method: str, endpoint: str, account_name: str, account: IdeauraAccountConfig, params: Dict = None) -> Dict:
+        cfg = self._get_global_config()
+        state = self._get_state(account_name)
+        url = f"{cfg.base_url}{endpoint}"
         headers = {
-            "Authorization": f"Bearer {account.token}",
+            "Authorization": f"Bearer {state.get('token', '')}",
             "Content-Type": "application/json",
         }
 
         try:
-            async with self.session.request(method, url, json=params, headers=headers) as resp:
-                raw = await self._parse_response(resp)
-                return self._standardize_response(raw, account)
-
-        except aiohttp.ClientError as e:
-            self.logger.error(f"HTTP {method} failed {endpoint}: {e}")
-            return self._error_response(str(e), 33000)
+            resp = await client.request(method, url, json=params, headers=headers)
+            raw = await self._parse_response(resp)
+            return self._standardize_response(raw, account_name)
+        except Exception as e:
+            self.logger.error(f"HTTP {method} 失败 {endpoint}: {e}")
+            return self.make_error(retcode=33000, message=str(e), raw=None)
 
     async def _parse_response(self, resp) -> Dict:
-        if resp.content_type and "json" in resp.content_type:
-            return await resp.json()
-
-        text = await resp.text()
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"raw": text}
+            return await resp.json()
+        except Exception:
+            text = await resp.text()
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {"raw": text}
 
-    def _standardize_response(self, raw: Dict, account: IdeauraAccountConfig) -> Dict:
+    def _standardize_response(self, raw: Dict, account_name: str) -> Dict:
+        state = self._get_state(account_name)
+        if not isinstance(raw, dict):
+            return self.make_error(
+                retcode=34000,
+                message=f"API 返回了意外格式: {type(raw)}",
+                raw=raw,
+            )
+
         success = raw.get("success", raw.get("ok", False))
         if isinstance(success, str):
             success = success.lower() == "true"
 
         status_code = raw.get("statusCode", raw.get("code", 0))
+        http_ok = 200 <= status_code < 300 if isinstance(status_code, int) else False
+        is_ok = bool(success) or http_ok
 
-        result = {
-            "status": "ok" if success or (200 <= status_code < 300 if isinstance(status_code, int) else False) else "failed",
-            "retcode": 0 if success else (status_code or -1),
-            "data": raw.get("data", raw),
-            "message": raw.get("message", raw.get("msg", "")),
-            "ideaura_raw": raw,
-            "self": {"user_id": account.user_id},
-        }
-
+        data = raw.get("data", raw)
         message_id = ""
-        data = raw.get("data", {})
         if isinstance(data, dict):
-            message_id = data.get("messageId", data.get("id", ""))
-        result["message_id"] = str(message_id)
-        if isinstance(result["data"], dict):
-            result["data"]["message_id"] = result["message_id"]
+            message_id = str(data.get("messageId", data.get("id", "")))
 
-        return result
+        response = self.make_response(
+            status="ok" if is_ok else "failed",
+            retcode=0 if is_ok else (status_code if isinstance(status_code, int) and status_code else -1),
+            data=data,
+            message_id=message_id,
+            message="" if is_ok else raw.get("message", raw.get("msg", "")),
+            raw=raw,
+        )
+        response["ideaura_raw"] = raw
+        response["self"] = {"user_id": state.get("user_id", "")}
+        return response
 
-    def _error_response(self, message: str, retcode: int = 34000) -> Dict:
-        return {
-            "status": "failed",
-            "retcode": retcode,
-            "data": None,
-            "message_id": "",
-            "message": message,
-            "ideaura_raw": None,
-        }
+    async def _upload_file(self, account_name: str, account: IdeauraAccountConfig, file_bytes: bytes, filename: str) -> Optional[Dict]:
+        import aiohttp
 
-    async def _upload_file(self, account: IdeauraAccountConfig, file_bytes: bytes, filename: str) -> Optional[Dict]:
-        self._ensure_session()
-
-        url = f"{self.base_url}/api/chat/upload"
-        headers = {"Authorization": f"Bearer {account.token}"}
+        cfg = self._get_global_config()
+        state = self._get_state(account_name)
+        url = f"{cfg.base_url}/api/chat/upload"
+        headers = {"Authorization": f"Bearer {state.get('token', '')}"}
 
         content_type = self._guess_content_type(filename)
         data = aiohttp.FormData()
         data.add_field("file", io.BytesIO(file_bytes), filename=filename, content_type=content_type)
 
         try:
-            timeout = aiohttp.ClientTimeout(total=600, connect=30)
-            async with self.session.post(url, data=data, headers=headers, timeout=timeout) as resp:
-                if resp.status == 413:
-                    self.logger.error("File too large for upload")
-                    return None
+            resp = await client.post(url, data=data, headers=headers, timeout=600)
+            if resp.status == 413:
+                self.logger.error("文件过大，无法上传")
+                return None
 
-                if resp.status >= 500:
-                    text = await resp.text()
-                    self.logger.error(f"File upload server error {resp.status}: {text[:200]}")
-                    return None
+            if resp.status >= 500:
+                text = await resp.text()
+                self.logger.error(f"文件上传服务器错误 {resp.status}: {text[:200]}")
+                return None
 
-                try:
-                    raw = await resp.json()
-                except Exception:
-                    text = await resp.text()
-                    self.logger.error(f"File upload bad response (status={resp.status}): {text[:200]}")
-                    return None
+            try:
+                raw = await resp.json()
+            except Exception:
+                text = await resp.text()
+                self.logger.error(f"文件上传响应异常 (status={resp.status}): {text[:200]}")
+                return None
 
-                if not raw.get("success", False):
-                    self.logger.error(f"File upload failed: {raw.get('message', raw)}")
-                    return None
+            if not raw.get("success", False):
+                self.logger.error(f"文件上传失败: {raw.get('message', raw)}")
+                return None
 
-                self.logger.debug(f"Upload response: {raw}")
-                return raw
-
-        except aiohttp.ClientError as e:
-            self.logger.error(f"File upload failed: {e}")
+            self.logger.debug(f"上传响应: {raw}")
+            return raw
+        except Exception as e:
+            self.logger.error(f"文件上传失败: {e}")
             return None
 
     async def _download_file(self, url: str, max_size: int = 10 * 1024 * 1024) -> tuple:
-        self._ensure_session()
-
         try:
             from urllib.parse import urlparse, unquote
             parsed = urlparse(url)
             filename = unquote(parsed.path.split("/")[-1]) or "downloaded_file"
 
-            async with self.session.get(url) as resp:
-                content_length = resp.headers.get("Content-Length")
-                if content_length and int(content_length) > max_size:
-                    self.logger.warning(f"File too large: {int(content_length) / 1024 / 1024:.2f}MB")
+            resp = await client.get(url, timeout=300)
+            content_length = resp.headers.get("Content-Length")
+            if content_length and int(content_length) > max_size:
+                self.logger.warning(f"文件过大: {int(content_length) / 1024 / 1024:.2f}MB")
+                return None, None
+
+            buffer = io.BytesIO()
+            downloaded = 0
+            async for chunk in resp.raw.content.iter_chunked(8192):
+                downloaded += len(chunk)
+                if downloaded > max_size:
+                    self.logger.warning("下载过程中文件过大")
                     return None, None
+                buffer.write(chunk)
 
-                buffer = io.BytesIO()
-                downloaded = 0
-                async for chunk in resp.content.iter_chunked(8192):
-                    downloaded += len(chunk)
-                    if downloaded > max_size:
-                        self.logger.warning("File too large during download")
-                        return None, None
-                    buffer.write(chunk)
-
-                buffer.seek(0)
-                return buffer.read(), filename
-
+            buffer.seek(0)
+            return buffer.read(), filename
         except Exception as e:
-            self.logger.error(f"Download failed: {e}")
+            self.logger.error(f"下载失败: {e}")
             return None, None
 
     def _read_local_file(self, file_path: str, max_size: int = 10 * 1024 * 1024) -> tuple:
         try:
             if not os.path.exists(file_path) or not os.path.isfile(file_path):
-                self.logger.error(f"File not found: {file_path}")
+                self.logger.error(f"文件不存在: {file_path}")
                 return None, None
 
             size = os.path.getsize(file_path)
             if size > max_size:
-                self.logger.warning(f"File too large: {size / 1024 / 1024:.2f}MB")
+                self.logger.warning(f"文件过大: {size / 1024 / 1024:.2f}MB")
                 return None, None
 
             filename = os.path.basename(file_path)
             with open(file_path, "rb") as f:
                 return f.read(), filename
-
         except Exception as e:
-            self.logger.error(f"Read file failed: {e}")
+            self.logger.error(f"读取文件失败: {e}")
             return None, None
 
     def _guess_content_type(self, filename: str) -> str:
