@@ -1,4 +1,25 @@
-# IdeauraAdapter 模块文档
+<div align="center">
+
+<img src=".github/assets/ErisPulseLogo.png" width="180" alt="ErisPulse IdeauraAdapter" />
+
+# ErisPulse IdeauraAdapter
+
+**花枫咖啡馆（Allons / Ideaura）协议适配器 —— 基于 ErisPulse。**
+
+基于 ErisPulse 架构的花枫咖啡馆（Allons / Ideaura）协议适配器，整合所有平台功能模块，提供统一的事件处理和消息操作接口，支持 Token 登录与邮箱密码登录两种方式。
+
+<p>
+  <a href="https://pypi.org/project/ErisPulse-Ideaura/"><img src="https://img.shields.io/pypi/v/ErisPulse-Ideaura?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ErisPulse-Ideaura/"><img src="https://img.shields.io/badge/Python-3.10+-FFD43B?style=for-the-badge&logo=python&logoColor=blue" alt="Python"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License"></a>
+  <a href="https://github.com/wsu2059q/ErisPulse-Ideaura"><img src="https://img.shields.io/github/stars/wsu2059q/ErisPulse-Ideaura?style=for-the-badge&logo=github&color=brightgreen" alt="Stars"></a>
+  <a href="https://pepy.tech/project/ErisPulse-Ideaura"><img src="https://img.shields.io/pepy/dt/ErisPulse-Ideaura?style=for-the-badge&color=blue" alt="Downloads"></a>
+  <a href="https://github.com/ErisPulse/ErisPulse"><img src="https://img.shields.io/badge/Powered_by-ErisPulse-FF6B9D?style=for-the-badge&logo=bookstack&logoColor=white" alt="ErisPulse"></a>
+</p>
+
+</div>
+
+---
 
 ## 简介
 IdeauraAdapter 是基于 [ErisPulse](https://github.com/ErisPulse/ErisPulse/) 架构的花枫咖啡馆（RockyChat）协议适配器，整合了所有平台功能模块，提供统一的事件处理和消息操作接口。
