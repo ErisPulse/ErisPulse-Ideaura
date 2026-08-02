@@ -20,9 +20,9 @@ from ErisPulse.Core.Event import register_event_mixin, unregister_platform_event
 @dataclass
 class IdeauraConfig(AdapterConfig):
     base_url: str = field(
-        default="https://api-cofe.allons-y.uk:3009",
+        default="https://api.mscpo.com/api/rockychat",
         metadata={
-            "description": "Ideaura API 基础地址",
+            "description": "花枫咖啡馆 API 基础地址",
             "required": False,
             "webui": {"widget": "text", "group": "connection", "order": 1},
         },
@@ -30,7 +30,7 @@ class IdeauraConfig(AdapterConfig):
     ws_url: str = field(
         default="wss://api-cofe.allons-y.uk:3009/mqtt",
         metadata={
-            "description": "Ideaura WebSocket 地址",
+            "description": "花枫咖啡馆 WebSocket 地址",
             "required": False,
             "webui": {"widget": "text", "group": "connection", "order": 2},
         },
@@ -58,34 +58,16 @@ class IdeauraAccountConfig(BotAccountConfig):
     token: str = field(
         default="",
         metadata={
-            "description": "登录Token（填写后优先使用Token登录，无需邮箱密码）",
-            "required": False,
+            "description": "Bot Token（机器人 API Token）",
+            "required": True,
             "secret": True,
             "webui": {"widget": "password", "group": "token", "order": 1},
         },
     )
-    email: str = field(
-        default="",
-        metadata={
-            "description": "账号邮箱（Token登录时可不填）",
-            "required": False,
-            "secret": True,
-            "webui": {"widget": "text", "group": "basic", "order": 2},
-        },
-    )
-    password: str = field(
-        default="",
-        metadata={
-            "description": "账号密码（Token登录时可不填）",
-            "required": False,
-            "secret": True,
-            "webui": {"widget": "password", "group": "basic", "order": 3},
-        },
-    )
 
     def has_valid_auth(self) -> bool:
-        """账户是否提供了有效的认证信息（Token 或 邮箱密码二选一）"""
-        return bool(self.token) or (bool(self.email) and bool(self.password))
+        """账户是否提供了有效的 Bot Token"""
+        return bool(self.token)
 
 
 class IdeauraEventMixin:
@@ -100,6 +82,15 @@ class IdeauraEventMixin:
 
     def is_sender_bot(self):
         return self.get("ideaura_sender_is_bot", False)
+
+    def is_receiver_bot(self):
+        return self.get("ideaura_receiver_is_bot", False)
+
+    def get_command_id(self):
+        return self.get("ideaura_command_id", "")
+
+    def get_command(self):
+        return self.get("ideaura_command_id", "")
 
     def get_topic_name(self):
         return self.get("ideaura_topic_name", "")
@@ -123,6 +114,11 @@ class IdeauraAdapter(BaseAdapter):
 
         def __init__(self, adapter, target_type=None, target_id=None, account_id=None):
             super().__init__(adapter, target_type, target_id, account_id)
+            self._command_id = None
+
+        def Command(self, command_id: str):
+            self._command_id = command_id
+            return self
 
         def Text(self, text: str):
             return self.Raw_ob12([{"type": "text", "data": {"text": text}}])
@@ -207,6 +203,12 @@ class IdeauraAdapter(BaseAdapter):
                 self._reply_message_id = seg_data.get("message_id", "")
                 return None
 
+            if seg_type == "ideaura_command":
+                cmd_id = seg_data.get("command_id") or seg_data.get("commandId", "")
+                if cmd_id:
+                    self._command_id = str(cmd_id)
+                return None
+
             if seg_type in ("mention", "mention_all"):
                 if seg_type == "mention_all":
                     self._at_user_ids.append({"type": "all"})
@@ -254,6 +256,8 @@ class IdeauraAdapter(BaseAdapter):
                 payload["mentions"] = list(self._at_user_ids)
             if self._reply_message_id:
                 payload["quotedMessageId"] = self._reply_message_id
+            if self._command_id:
+                payload["commandId"] = self._command_id
             return endpoint, payload
 
         async def _send_text(self, text: str, account_name: str, account: IdeauraAccountConfig, subtype: str = "text") -> Dict:
@@ -377,8 +381,6 @@ class IdeauraAdapter(BaseAdapter):
             data = {
                 "default": {
                     "token": "",
-                    "email": "",
-                    "password": "",
                     "enabled": True,
                 }
             }
@@ -397,7 +399,7 @@ class IdeauraAdapter(BaseAdapter):
 
             if not instance.has_valid_auth():
                 self.logger.warning(
-                    f"账户 '{name}' 缺少有效认证信息（需提供 token 或 email+password），已跳过"
+                    f"账户 '{name}' 缺少有效认证信息（需提供 token），已跳过"
                 )
                 continue
 
@@ -448,36 +450,10 @@ class IdeauraAdapter(BaseAdapter):
 
     async def _login(self, name: str, account: IdeauraAccountConfig):
         state = self._get_state(name)
-
-        # Token 登录：直接使用配置的 token，无需调用登录接口
-        if account.token:
-            state["token"] = account.token
-            self.logger.info(f"账户 {name} 使用 Token 登录")
-            return
-
-        # 邮箱密码登录
-        cfg = self._get_global_config()
-        url = f"{cfg.base_url}/api/auth/login"
-        payload = {
-            "email": account.email,
-            "password": account.password,
-        }
-
-        resp = await client.post(url, json=payload)
-        data = await resp.json()
-
-        token = data.get("token") or data.get("data", {}).get("token")
-        if not token:
-            raise ValueError(f"Login failed for {account.email}: {data}")
-
-        state["token"] = token
-
-        user_data = data.get("data", {}).get("user", data.get("data", {}))
-        if not user_data:
-            user_data = data
-        state["user_id"] = str(user_data.get("id", data.get("userId", "")))
-
-        self.logger.info(f"账户 {name} 登录成功 (user_id={state['user_id']})")
+        if not account.token:
+            raise ValueError(f"账户 {name} 缺少 Bot Token")
+        state["token"] = account.token
+        self.logger.info(f"账户 {name} 已加载 Bot Token")
 
     async def _get_user_info(self, name: str, account: IdeauraAccountConfig):
         state = self._get_state(name)
@@ -509,10 +485,14 @@ class IdeauraAdapter(BaseAdapter):
 
         resp_data = data.get("data", {})
         topic = resp_data.get("inboxTopic") or resp_data.get("topic") or data.get("topic")
+        internal_token = resp_data.get("internalToken")
         if not topic:
             raise ValueError(f"Failed to get inbox topic for {name}: {data}")
+        if not internal_token:
+            raise ValueError(f"Failed to get internalToken for {name}: {data}")
 
         state["inbox_topic"] = topic
+        state["internal_token"] = internal_token
 
         if resp_data.get("userId") and not state.get("user_id"):
             state["user_id"] = str(resp_data["userId"])
@@ -525,18 +505,21 @@ class IdeauraAdapter(BaseAdapter):
 
         while self._running:
             try:
+                await self._get_inbox_topic(name, account)
+                internal_token = state.get("internal_token", "")
+
                 ws = await client.ws_connect(cfg.ws_url)
                 state["ws_session"] = ws
 
-                await ws.send_json({"type": "connect", "token": state.get("token", "")})
+                await ws.send_json({"type": "connect", "token": internal_token})
 
                 msg = await asyncio.wait_for(ws.receive(), timeout=30)
                 if msg.type != WSMessage.TEXT:
                     raise ValueError(f"Unexpected WS message type: {msg.type}")
 
                 connack = json.loads(msg.data)
-                if connack.get("type") != "connack":
-                    raise ValueError(f"Expected connack, got: {connack}")
+                if connack.get("type") != "connack" or connack.get("returnCode", 0) != 0:
+                    raise ValueError(f"WS authentication failed, connack: {connack}")
 
                 await ws.send_json({
                     "type": "subscribe",
@@ -659,7 +642,7 @@ class IdeauraAdapter(BaseAdapter):
 
         self.logger.info("IdeauraAdapter 已关闭")
 
-    async def call_api(self, endpoint: str, _account_id: str = None, **params):
+    async def call_api(self, endpoint: str, _account_id: str = None, method: str = None, **params):
         account_name, account = self._resolve_account(_account_id)
         echo = params.pop("echo", None)
 
@@ -670,7 +653,8 @@ class IdeauraAdapter(BaseAdapter):
                 result = await self._api_delete_message(account_name, account, **params)
             else:
                 api_path = endpoint if endpoint.startswith("/api/") else f"/api/{endpoint}"
-                result = await self._http_request("POST", api_path, account_name, account, params)
+                http_method = method.upper() if method else ("GET" if not params else "POST")
+                result = await self._http_request(http_method, api_path, account_name, account, params)
 
             if echo is not None:
                 result["echo"] = echo

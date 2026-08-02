@@ -1,7 +1,7 @@
 [project]
 name = "ErisPulse-Ideaura"
-version = "4.0.0"
-description = "ErisPulse的Ideaura平台适配器"
+version = "4.0.1"
+description = "ErisPulse的花枫咖啡馆适配器"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

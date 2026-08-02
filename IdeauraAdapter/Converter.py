@@ -125,7 +125,9 @@ class IdeauraConverter:
 
         sender_name = data.get("senderName", data.get("nickname", data.get("username", "")))
         sender_avatar = data.get("senderAvatar", "")
-        sender_is_bot = data.get("senderIsBot", False)
+        sender_is_bot = data.get("senderIsBot", data.get("isBot", data.get("is_bot", False)))
+        receiver_is_bot = data.get("receiverIsBot", data.get("receiver_is_bot", False))
+        command_id = data.get("command_id", data.get("commandId", ""))
 
         base_event["time"] = self._parse_time(data.get("created_at", data.get("timestamp")))
 
@@ -229,6 +231,8 @@ class IdeauraConverter:
         base_event["ideaura_sender_name"] = sender_name
         base_event["ideaura_sender_avatar"] = sender_avatar
         base_event["ideaura_sender_is_bot"] = sender_is_bot
+        base_event["ideaura_receiver_is_bot"] = receiver_is_bot
+        base_event["ideaura_command_id"] = str(command_id) if command_id else ""
         base_event["ideaura_is_self"] = data.get("isSelf", False)
         base_event["ideaura_topic_name"] = data.get("topicName", "")
         base_event["ideaura_message_type"] = message_type
