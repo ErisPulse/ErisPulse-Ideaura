@@ -2,7 +2,7 @@
 
 ## Ideaura特有事件类型
 
-花枫咖啡馆（Allons）平台提供以下特有事件类型，可在消息处理中检测使用：
+花枫咖啡馆（RockyChat）平台提供以下特有事件类型，可在消息处理中检测使用：
 
 ### 1. 普通消息
 - **payload.type**: 消息的 `source_type` 为 `chatroom`、`topic` 或 `private`
@@ -593,12 +593,16 @@ Ideaura适配器支持使用 OneBot12 消息段格式发送消息，支持以下
 | `reply` | 回复消息 | `message_id`: 消息ID |
 | `mention` | @用户 | `user_id`: 用户ID |
 | `mention_all` | @全体 | 无参数 |
+| `ideaura_command` | Bot 指令 | `command_id`: 指令UUID |
 
 ### 4. 使用链式调用发送
 
 ```python
 # 基础发送
 await ideaura.Send.To("group", "chatroom").Text("Hello")
+
+# 触发 Bot 指令
+await ideaura.Send.To("group", "chatroom").Command("550e8400-e29b-41d4-a716-446655440000").Text("/weather 北京")
 
 # 发送带@的消息
 await ideaura.Send.To("group", "chatroom").At("456").Text("@李四 你好")

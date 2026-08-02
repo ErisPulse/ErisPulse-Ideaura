@@ -1,6 +1,6 @@
-# 花枫咖啡馆（Ideaura）平台特性文档
+# 花枫咖啡馆（RockyChat）平台特性文档
 
-IdeauraAdapter 是基于花枫咖啡馆（Allons）平台 API 构建的适配器，整合了所有平台功能模块，提供统一的事件处理和消息操作接口。
+IdeauraAdapter 是基于花枫咖啡馆（RockyChat）平台 API 构建的适配器，整合了所有平台功能模块，提供统一的事件处理和消息操作接口。
 
 ---
 
@@ -11,7 +11,7 @@ IdeauraAdapter 是基于花枫咖啡馆（Allons）平台 API 构建的适配器
 
 ## 基本信息
 
-- 平台简介：花枫咖啡馆（Allons）是一个即时通讯平台
+- 平台简介：花枫咖啡馆（RockyChat）是一个即时通讯平台
 - 适配器名称：IdeauraAdapter
 - 多账户支持：支持通过 token 或 email/password 配置多个账户
 - 链式修饰支持：支持 `.At()`、`.AtAll()`、`.Reply()` 等链式修饰方法

@@ -1,7 +1,7 @@
 # IdeauraAdapter 模块文档
 
 ## 简介
-IdeauraAdapter 是基于 [ErisPulse](https://github.com/ErisPulse/ErisPulse/) 架构的花枫咖啡馆（Allons）协议适配器，整合了所有平台功能模块，提供统一的事件处理和消息操作接口。
+IdeauraAdapter 是基于 [ErisPulse](https://github.com/ErisPulse/ErisPulse/) 架构的花枫咖啡馆（RockyChat）协议适配器，整合了所有平台功能模块，提供统一的事件处理和消息操作接口。
 
 ## 使用示例
 
@@ -37,6 +37,9 @@ await ideaura.Send.To("user", "user_id").Text("Hello World!")
 
 # 发送带@的消息
 await ideaura.Send.To("group", "chatroom").At("456").Text("@李四 你好")
+
+# 触发 Bot 指令
+await ideaura.Send.To("group", "chatroom").Command("550e8400-e29b-41d4-a716-446655440000").Text("/weather 北京")
 
 # @多人
 await ideaura.Send.To("group", "chatroom").At("456").At("789").Text("@多人")
@@ -91,48 +94,43 @@ await ideaura.Send.To("group", "chatroom").Reply("1001").At("456").Text("回复�
 
 ### 配置说明
 
-首次运行会生成配置。Ideaura适配器支持多账户配置。
+首次运行会生成配置。花枫咖啡馆适配器支持多账户配置。
 
 #### 首次运行生成的默认配置
 
 ```toml
 [IdeauraAdapter.accounts.default]
-token = ""             # 登录Token（选填，填写后优先使用Token登录）
-email = ""            # 登录邮箱（Token登录时可不填，邮箱密码登录时必填）
-password = ""         # 登录密码（Token登录时可不填，邮箱密码登录时必填）
-enabled = false       # 是否启用（填写完认证信息后改为true）
+token = ""             # 机器人 API Token (bot-token-...)
+enabled = false       # 是否启用（填写完 token 后改为 true）
 ```
 
-> 支持两种登录方式（二选一）：
-> - **Token 登录**：只填 `token`，无需邮箱密码
-> - **邮箱密码登录**：填 `email` + `password`
+> 适配器使用 **Bot Token** 进行认证。
+
+> **Bot Token**需要前往[MSCPO开放平台](https://open.mscpo.com/rockychat/bots)获取。
 
 #### 多账户配置示例
 
 ```toml
-# 账户1：Token 登录
+# 账户1
 [IdeauraAdapter.accounts.bot1]
-token = "your-token-here"
+token = "bot-token-xxxxxx1"
 enabled = true
 
-# 账户2：邮箱密码登录
+# 账户2
 [IdeauraAdapter.accounts.bot2]
-email = "bot2@example.com"
-password = "password2"
+token = "bot-token-xxxxxx2"
 enabled = true
 
 # 可选：自定义服务器地址
 [IdeauraAdapter]
-base_url = "https://api-cofe.allons-y.uk:3009"
+base_url = "https://api.mscpo.com/api/rockychat"
 ws_url = "wss://api-cofe.allons-y.uk:3009/mqtt"
 heartbeat_interval = 30
 ```
 
 **配置项说明：**
-- `token`：登录Token（选填，填写后优先使用Token登录，无需邮箱密码）
-- `email`：账户登录邮箱（Token登录时可不填，邮箱密码登录时必填）
-- `password`：账户登录密码（Token登录时可不填，邮箱密码登录时必填）
-- `enabled`：是否启用该账户（可选，默认为true）
+- `token`：机器人 API Token（以 `bot-token-` 开头）
+- `enabled`：是否启用该账户（可选，默认为 true）
 
 **全局配置项：**
 - `base_url`：API 服务器地址（可选，默认为花枫咖啡馆官方地址）
@@ -176,8 +174,13 @@ async def handle_message(event):
         detail_type = event.get("detail_type")
         text = event.get_text()
         
+        # 获取触发的 Bot 指令 ID（若有）
+        cmd_id = event.get_command_id()
+        if cmd_id:
+            print(f"收到指令: {cmd_id}")
+
         if detail_type == "group":
-            source_type = event.get("ideaura_source_type")
+            source_type = event.get_source_type()
             if source_type == "topic":
                 topic_name = event.get("ideaura_topic_name")
         elif detail_type == "private":
@@ -225,7 +228,7 @@ async def handle_request(event):
 ## 注意事项
 
 1. 确保在调用 `startup()` 前完成所有处理器的注册
-2. 适配器使用 WebSocket 长连接接收事件，支持自动重连（固定5秒延迟）
+2. 适配器使用 WebSocket 长连接接收事件，在连接时自动向 API 请求 `internalToken` 进行认证，支持自动重连（固定5秒延迟）
 3. 二进制内容（图片/视频等）支持 bytes、URL、本地路径三种输入方式
 4. 文件大小限制为 10MB
 5. 自身发送的消息（`isSelf: true`）会被自动过滤，不会产生事件
