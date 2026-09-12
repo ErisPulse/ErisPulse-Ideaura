@@ -13,8 +13,8 @@ IdeauraAdapter 是基于花枫咖啡馆（RockyChat）平台 API 构建的适配
 
 - 平台简介：花枫咖啡馆（RockyChat）是一个即时通讯平台
 - 适配器名称：IdeauraAdapter
-- 多账户支持：支持通过 token 或 email/password 配置多个账户
-- 链式修饰支持：支持 `.At()`、`.AtAll()`、`.Reply()` 等链式修饰方法
+- 多账户支持：支持通过 Bot Token 配置多个账户
+- 链式修饰支持：支持 `.At()`、`.AtAll()`、`.Reply()`、`.Command()` 等链式修饰方法
 - OneBot12兼容：支持发送 OneBot12 格式消息
 
 ## 支持的消息发送类型
@@ -46,12 +46,16 @@ await ideaura.Send.To("group", "chatroom").Text("Hello World!")
 - `.At(user_id: str, name: str = None)`：@指定用户。
 - `.AtAll()`：@所有人。
 - `.Reply(message_id: str)`：回复指定消息。
+- `.Command(command_id: str)`：触发 Bot 指令，配合发送方法使用（将消息作为指定指令发送）。
 
 ### 链式调用示例
 
 ```python
 # 基础发送
 await ideaura.Send.To("user", user_id).Text("Hello")
+
+# 触发 Bot 指令
+await ideaura.Send.To("group", "chatroom").Command("550e8400-e29b-41d4-a716-446655440000").Text("/weather 北京")
 
 # @用户
 await ideaura.Send.To("group", "chatroom").At("456").Text("@李四 你好")
@@ -325,36 +329,35 @@ async def handle_notice(event):
 
 ### 配置说明
 
-IdeauraAdapter 支持同时配置和运行多个账户，每个账户可选择 Token 登录或邮箱密码登录（二选一）。
+IdeauraAdapter 支持同时配置和运行多个账户，使用 **Bot Token** 认证。
+
+> 4.0.1 起**移除邮箱密码登录**，仅支持 Bot Token。Bot Token 需前往 [MSCPO 开放平台](https://open.mscpo.com/rockychat/bots) 获取（以 `bot-token-` 开头）。
 
 ```toml
 # config.toml
-# 账户1：Token 登录（推荐，无需邮箱密码）
+# 账户1
 [IdeauraAdapter.accounts.default]
-token = "your-token-here"        # 登录Token（与 email+password 二选一）
+token = "bot-token-xxxxxx1"      # 机器人 API Token（必填）
 enabled = true                   # 是否启用（可选，默认为true）
 
-# 账户2：邮箱密码登录
+# 账户2
 [IdeauraAdapter.accounts.bot2]
-email = "user2@example.com"      # 登录邮箱
-password = "password2"           # 登录密码
+token = "bot-token-xxxxxx2"
 enabled = true
 
 # 可选：自定义服务器地址
 [IdeauraAdapter]
-base_url = "https://api-cofe.allons-y.uk:3009"
+base_url = "https://api.mscpo.com/api/rockychat"
 ws_url = "wss://api-cofe.allons-y.uk:3009/mqtt"
 heartbeat_interval = 30
 ```
 
 **配置项说明：**
-- `token`：登录Token（选填，填写后优先使用Token登录，无需邮箱密码）
-- `email`：登录邮箱（Token登录时可不填，邮箱密码登录时必填）
-- `password`：登录密码（Token登录时可不填，邮箱密码登录时必填）
+- `token`：机器人 API Token（必填，以 `bot-token-` 开头）
 - `enabled`：是否启用该账户（可选，默认为true）
 
 **全局配置项：**
-- `base_url`：API 服务器地址（可选，默认为花枫咖啡馆官方地址）
+- `base_url`：API 服务器地址（可选，默认为 `https://api.mscpo.com/api/rockychat`）
 - `ws_url`：WebSocket 服务器地址（可选，默认为花枫咖啡馆官方地址）
 - `heartbeat_interval`：心跳间隔秒数（可选，默认30秒）
 
@@ -429,7 +432,7 @@ async def handle_message(event):
 
 ## 注意事项
 
-1. 服务器地址 `api-cofe.allons-y.uk` 是平台固有地址，不随适配器名称变化
+1. API 服务器默认地址为 `https://api.mscpo.com/api/rockychat`（可通过 `base_url` 自定义）；WebSocket 地址 `wss://api-cofe.allons-y.uk:3009/mqtt` 为平台固有地址，不随适配器名称变化
 2. 适配器使用 WebSocket 长连接接收事件，支持自动重连（固定5秒延迟）
 3. 自身发送的消息（`isSelf: true`）会被自动过滤，不会产生事件
 4. @全体（`AtAll()`）需要管理员权限
