@@ -3,9 +3,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
+from ErisPulse.Core.Bases import BaseConverter
 
-class IdeauraConverter:
+
+class IdeauraConverter(BaseConverter):
     def __init__(self):
+        super().__init__(platform="ideaura")
         self._setup_event_mapping()
 
     def _setup_event_mapping(self):
@@ -33,20 +36,14 @@ class IdeauraConverter:
         event_type = data.get("eventType", data.get("subtype", ""))
         message_type = data.get("messageType", data.get("message_type", ""))
 
-        base_event = {
-            "id": str(uuid.uuid4()),
-            "time": self._parse_time(data.get("created_at", data.get("timestamp", data.get("createdAt")))),
-            "type": "",
-            "detail_type": "",
-            "sub_type": "",
-            "platform": "ideaura",
-            "self": {
-                "platform": "ideaura",
-                "user_id": self_user_id or "",
-            },
-            "ideaura_raw": data,
-            "ideaura_raw_type": payload_type or message_type,
-        }
+        # 基础事件结构（BaseConverter 骨架 + Ideaura 语义覆盖）
+        base_event = self.build_base_event(data, payload_type or message_type)
+        base_event["id"] = str(uuid.uuid4())
+        base_event["time"] = self._parse_time(data.get("created_at", data.get("timestamp", data.get("createdAt"))))
+        base_event["type"] = ""
+        base_event["detail_type"] = ""
+        base_event["sub_type"] = ""
+        base_event["self"]["user_id"] = self_user_id or ""
 
         if payload_type == "message_event":
             return self._handle_message_event(event_type, data, base_event)

@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import io
 import json
 import os
@@ -8,17 +8,27 @@ from dataclasses import dataclass, field
 from ErisPulse.Core import client, router
 from ErisPulse.Core.Bases.adapter import BaseAdapter
 from ErisPulse.Core.Bases.websocket import WSMessage
-from ErisPulse.runtime.config_schema import (
+from ErisPulse.Core.Bases import (
     BotAccountConfig,
-    AdapterConfig,
-    dict_to_dataclass,
+    BaseConfig,
 )
+from ErisPulse.Core.Bases.config_schema import dict_to_dataclass
 from ErisPulse.Core.config import config as config_mgr
 from ErisPulse.Core.Event import register_event_mixin, unregister_platform_event_methods
 
+try:
+    from ErisPulse.runtime.tasks import spawn_background
+except ImportError:  # pragma: no cover
+    spawn_background = None
+
+__version__ = "4.1.0"
+
+# 软依赖的框架最低版本（运行时检测，仅提示不强制）
+MIN_FRAMEWORK_VERSION = (2, 7, 1)
+
 
 @dataclass
-class IdeauraConfig(AdapterConfig):
+class IdeauraConfig(BaseConfig):
     base_url: str = field(
         default="https://api.mscpo.com/api/rockychat",
         metadata={
@@ -363,11 +373,43 @@ class IdeauraAdapter(BaseAdapter):
     def __init__(self, sdk_ref=None):
         super().__init__(sdk_ref)
         self._running = False
-        # 每个账户的运行时状态（登录后获得，不属于配置）
+        # 每个账户的运行时状态（仅记录引用，请勿直接赋值）
         # _runtime_state[name] = {token, user_id, username, avatar_url, inbox_topic,
         #                         ws_session, heartbeat_task, receive_task}
         self._runtime_state: Dict[str, dict] = {}
         self.convert = self._setup_converter()
+        self._check_framework_version()
+        self._get_logger().info(f"IdeauraAdapter v{__version__} 已加载")
+
+    @staticmethod
+    def _parse_version(version_str: str) -> tuple:
+        """解析版本号为可比较的三元组（忽略 dev/预发布后缀，如 2.8.0-dev.3 → (2, 8, 0)）"""
+        parts = []
+        for piece in str(version_str).split("."):
+            digits = "".join(ch for ch in piece if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts[:3])
+
+    def _check_framework_version(self):
+        """软依赖检测：框架版本过低时打警告（不阻断加载）"""
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            raw = _pkg_version("ErisPulse")
+        except Exception:
+            return
+        try:
+            if self._parse_version(raw) < MIN_FRAMEWORK_VERSION:
+                self._get_logger().warning(
+                    f"当前 ErisPulse 版本 {raw} 过低：IdeauraAdapter v{__version__} 需要 >= "
+                    f"{'.'.join(map(str, MIN_FRAMEWORK_VERSION))}"
+                    "（BaseConverter / spawn_background 等特性），"
+                    "部分功能可能不可用，建议升级框架"
+                )
+        except Exception:
+            pass
 
     def _get_config_key(self) -> str:
         return "IdeauraAdapter"
@@ -431,7 +473,12 @@ class IdeauraAdapter(BaseAdapter):
             return
 
         for name, account in self.enabled_accounts.items():
-            asyncio.create_task(self._start_account(name, account))
+            coro = self._start_account(name, account)
+            # 生命周期任务使用 spawn_background（owner 归属，shutdown 自动回收）
+            if spawn_background is not None:
+                spawn_background(coro)
+            else:
+                asyncio.create_task(coro)
 
         self.logger.info(f"IdeauraAdapter 已启动，共 {len(self.enabled_accounts)} 个账户")
 
