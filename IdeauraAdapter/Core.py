@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "4.2.0"
+__version__ = "4.3.0"
 
 # 软依赖的框架最低版本（运行时检测，仅提示不强制）
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
@@ -93,7 +93,7 @@ class IdeauraConfig(BaseConfig):
         metadata={
             "description": "花枫咖啡馆 API 基础地址",
             "required": False,
-            "webui": {"widget": "text", "group": "connection", "order": 1},
+            "ui": {"widget": "text", "group": "connection", "order": 1},
         },
     )
     ws_url: str = field(
@@ -101,7 +101,7 @@ class IdeauraConfig(BaseConfig):
         metadata={
             "description": "花枫咖啡馆 WebSocket 地址",
             "required": False,
-            "webui": {"widget": "text", "group": "connection", "order": 2},
+            "ui": {"widget": "text", "group": "connection", "order": 2},
         },
     )
     heartbeat_interval: int = field(
@@ -109,7 +109,7 @@ class IdeauraConfig(BaseConfig):
         metadata={
             "description": "心跳间隔（秒）",
             "required": False,
-            "webui": {"widget": "number", "group": "advanced", "order": 3},
+            "ui": {"widget": "number", "group": "advanced", "order": 3},
         },
     )
     reconnect_delay: int = field(
@@ -117,7 +117,7 @@ class IdeauraConfig(BaseConfig):
         metadata={
             "description": "重连延迟（秒）",
             "required": False,
-            "webui": {"widget": "number", "group": "advanced", "order": 4},
+            "ui": {"widget": "number", "group": "advanced", "order": 4},
         },
     )
 
@@ -130,7 +130,7 @@ class IdeauraAccountConfig(BotAccountConfig):
             "description": "Bot Token（机器人 API Token）",
             "required": True,
             "secret": True,
-            "webui": {"widget": "password", "group": "token", "order": 1},
+            "ui": {"widget": "password", "group": "token", "order": 1},
         },
     )
 
