@@ -6,7 +6,7 @@
 
 # ErisPulse-Ideaura
 
-**ErisPulse Ideaura (Allons) adapter — multi-scenario chat platform**
+**ErisPulse 花枫咖啡馆（Allons）适配器 — 多场景聊天平台**
 
 <p>
   <a href="https://pypi.org/project/ErisPulse-Ideaura/"><img src="https://img.shields.io/pypi/v/ErisPulse-Ideaura?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI"></a>
