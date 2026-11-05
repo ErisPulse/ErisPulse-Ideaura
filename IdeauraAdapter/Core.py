@@ -1,10 +1,13 @@
 import asyncio
+import base64
 import html as _html
 import io
 import json
 import os
+import re
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 from ErisPulse.Core import client, router
 from ErisPulse.Core.Bases.adapter import BaseAdapter
@@ -22,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "4.3.0"
+__version__ = "4.3.1"
 
 # 软依赖的框架最低版本（运行时检测，仅提示不强制）
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
@@ -52,6 +55,41 @@ def _forward_nodes_plain(nodes, separator: str = "\n") -> str:
         elif text:
             lines.append(text)
     return separator.join(lines)
+
+
+def _strip_file_scheme(path: str) -> str:
+    """剥除 file:// 前缀并解码百分号编码（file:///D:/a%20b.png → D:/a b.png）"""
+    if path.startswith("file://"):
+        path = unquote(path[len("file://"):])
+        if re.match(r"^/[A-Za-z]:", path):
+            path = path[1:]
+    return path
+
+
+def _decode_bare_base64(text: str) -> tuple:
+    """裸 base64 字符串解码为 (bytes, 失败原因)，非法格式返回 (None, 原因)"""
+    text = text.strip()
+    if not text or len(text) % 4 != 0:
+        return None, "非 base64 格式（长度不是 4 的倍数）"
+    if not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", text):
+        return None, "含非 base64 字符集"
+    try:
+        return base64.b64decode(text, validate=True), None
+    except Exception as e:
+        return None, f"base64 解码失败: {e}"
+
+
+def _decode_data_uri(uri: str) -> tuple:
+    """data: URI 解码为 (bytes, 失败原因)；;base64 载荷按 base64 解码，其余按 URL 编码文本解码"""
+    header, sep, payload = uri.partition(",")
+    if not sep:
+        return None, "data URI 缺少 , 分隔符"
+    if ";base64" in header:
+        try:
+            return base64.b64decode(payload.strip()), None
+        except Exception as e:
+            return None, f"data URI base64 解码失败: {e}"
+    return unquote(payload).encode("utf-8"), None
 
 
 def _build_forward_html(nodes, title: str = "合并聊天记录") -> str:
@@ -262,21 +300,6 @@ class IdeauraAdapter(BaseAdapter):
                 )
             )
 
-        def __getattr__(self, name):
-            if name.startswith("_"):
-                raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-
-            known = {"text", "image", "video", "file", "face", "voice", "markdown", "html"}
-            lower = name.lower()
-            if lower in known:
-                return getattr(self, lower.capitalize())
-
-            async def _unimplemented(*args, **kwargs):
-                self._adapter.logger.debug(f"Send method '{name}' is not implemented")
-                return None
-
-            return _unimplemented
-
         def Raw_ob12(self, message, **kwargs):
             if isinstance(message, dict):
                 message = [message]
@@ -301,7 +324,12 @@ class IdeauraAdapter(BaseAdapter):
                     result = await self._send_segment(segment)
                     if result:
                         results.append(result)
-                return results[-1] if results else None
+                if results:
+                    return results[-1]
+                return self._adapter.make_error(
+                    retcode=10002,
+                    message="消息仅包含修饰段（reply/mention 等），无可发送内容",
+                )
 
             return asyncio.create_task(_send())
 
@@ -330,7 +358,7 @@ class IdeauraAdapter(BaseAdapter):
             ctx = self.send_context
             account_name, account = self._adapter._resolve_account(ctx.get("account_id"))
             if not account:
-                raise ValueError("No available account")
+                return self._adapter.make_error(retcode=10002, message="No available account")
 
             if seg_type == "text":
                 return await self._send_text(seg_data.get("text", ""), account_name, account)
@@ -338,6 +366,8 @@ class IdeauraAdapter(BaseAdapter):
                 return await self._send_media(seg_data, "image", account_name, account)
             elif seg_type == "video":
                 return await self._send_media(seg_data, "video", account_name, account)
+            elif seg_type == "audio":
+                return await self._send_media(seg_data, "file", account_name, account)
             elif seg_type == "file":
                 return await self._send_media(seg_data, "file", account_name, account)
             elif seg_type == "ideaura_markdown":
@@ -380,9 +410,12 @@ class IdeauraAdapter(BaseAdapter):
             file = seg_data.get("file")
             filename = seg_data.get("filename")
 
-            file_bytes, resolved_name = await self._resolve_file(file, filename)
+            file_bytes, resolved_name, reason = await self._resolve_file(file, filename)
             if file_bytes is None:
-                raise ValueError(f"Failed to resolve file: {file}")
+                return self._adapter.make_error(
+                    retcode=10002,
+                    message=f"Failed to resolve file: {reason or file}",
+                )
 
             resolved_name = self._resolve_filename(file_bytes, resolved_name, media_type)
 
@@ -452,23 +485,38 @@ class IdeauraAdapter(BaseAdapter):
             return ""
 
         async def _resolve_file(self, file, filename: str = None) -> tuple:
+            """解析 file 引用为 (bytes, 文件名, 失败原因)，成功时失败原因为 None"""
             if isinstance(file, bytes):
-                return file, filename or "file.bin"
+                return file, filename or "file.bin", None
 
             if isinstance(file, str):
-                if file.startswith("http://") or file.startswith("https://"):
-                    file_bytes, dl_name = await self._adapter._download_file(file)
-                    if file_bytes is None:
-                        return None, None
-                    return file_bytes, filename or dl_name or "file.bin"
+                path = _strip_file_scheme(file)
 
-                if os.path.exists(file):
-                    file_bytes, local_name = self._adapter._read_local_file(file)
+                if path.startswith("http://") or path.startswith("https://"):
+                    file_bytes, dl_name, reason = await self._adapter._download_file(path)
                     if file_bytes is None:
-                        return None, None
-                    return file_bytes, filename or local_name or "file.bin"
+                        return None, None, reason
+                    return file_bytes, filename or dl_name or "file.bin", None
 
-            return None, None
+                if path.startswith("data:"):
+                    decoded, reason = _decode_data_uri(path)
+                    if decoded is None:
+                        return None, None, reason
+                    return decoded, filename or "file.bin", None
+
+                if os.path.exists(path):
+                    file_bytes, local_name, reason = self._adapter._read_local_file(path)
+                    if file_bytes is None:
+                        return None, None, reason
+                    return file_bytes, filename or local_name or "file.bin", None
+
+                decoded, _ = _decode_bare_base64(path)
+                if decoded is not None:
+                    return decoded, filename or "file.bin", None
+
+                return None, None, f"文件引用无法解析（非 URL/本地路径/base64/data URI）: {path[:100]}"
+
+            return None, None, f"不支持的 file 类型: {type(file).__name__}"
 
     def __init__(self, sdk_ref=None):
         super().__init__(sdk_ref)
@@ -995,49 +1043,62 @@ class IdeauraAdapter(BaseAdapter):
             return None
 
     async def _download_file(self, url: str, max_size: int = 10 * 1024 * 1024) -> tuple:
+        """下载 URL 文件为 (bytes, 文件名, 失败原因)，成功时失败原因为 None"""
         try:
             from urllib.parse import urlparse, unquote
             parsed = urlparse(url)
             filename = unquote(parsed.path.split("/")[-1]) or "downloaded_file"
+            max_mb = max_size / 1024 / 1024
 
             resp = await client.get(url, timeout=300)
             content_length = resp.headers.get("Content-Length")
             if content_length and int(content_length) > max_size:
-                self.logger.warning(f"文件过大: {int(content_length) / 1024 / 1024:.2f}MB")
-                return None, None
+                size_mb = int(content_length) / 1024 / 1024
+                self.logger.warning(
+                    f"文件下载超限: {filename} {size_mb:.2f}MB 超过 {max_mb:.0f}MB 上限"
+                )
+                return None, None, f"文件下载超限: {filename} ({size_mb:.2f}MB > {max_mb:.0f}MB 上限)"
 
             buffer = io.BytesIO()
             downloaded = 0
             async for chunk in resp.raw.content.iter_chunked(8192):
                 downloaded += len(chunk)
                 if downloaded > max_size:
-                    self.logger.warning("下载过程中文件过大")
-                    return None, None
+                    self.logger.warning(f"文件下载超限: {filename} 下载量超过 {max_mb:.0f}MB 上限")
+                    return None, None, f"文件下载超限: {filename} (> {max_mb:.0f}MB 上限)"
                 buffer.write(chunk)
 
             buffer.seek(0)
-            return buffer.read(), filename
+            return buffer.read(), filename, None
         except Exception as e:
             self.logger.error(f"下载失败: {e}")
-            return None, None
+            return None, None, f"下载失败: {e}"
 
     def _read_local_file(self, file_path: str, max_size: int = 10 * 1024 * 1024) -> tuple:
+        """读取本地文件为 (bytes, 文件名, 失败原因)，成功时失败原因为 None"""
         try:
             if not os.path.exists(file_path) or not os.path.isfile(file_path):
                 self.logger.error(f"文件不存在: {file_path}")
-                return None, None
+                return None, None, f"文件不存在: {file_path}"
 
             size = os.path.getsize(file_path)
             if size > max_size:
-                self.logger.warning(f"文件过大: {size / 1024 / 1024:.2f}MB")
-                return None, None
+                size_mb = size / 1024 / 1024
+                max_mb = max_size / 1024 / 1024
+                self.logger.warning(
+                    f"文件读取超限: {os.path.basename(file_path)} {size_mb:.2f}MB 超过 {max_mb:.0f}MB 上限"
+                )
+                return None, None, (
+                    f"文件读取超限: {os.path.basename(file_path)} "
+                    f"({size_mb:.2f}MB > {max_mb:.0f}MB 上限)"
+                )
 
             filename = os.path.basename(file_path)
             with open(file_path, "rb") as f:
-                return f.read(), filename
+                return f.read(), filename, None
         except Exception as e:
             self.logger.error(f"读取文件失败: {e}")
-            return None, None
+            return None, None, f"读取文件失败: {e}"
 
     def _guess_content_type(self, filename: str) -> str:
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
