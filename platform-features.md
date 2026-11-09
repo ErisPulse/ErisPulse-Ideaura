@@ -7,7 +7,9 @@ IdeauraAdapter 是基于花枫咖啡馆（RockyChat）平台 API 构建的适配
 ## 文档信息
 
 - 对应模块: ErisPulse-Ideaura
+- 对应模块版本: 4.3.2
 - 维护者: ErisPulse
+- 最后更新: 2026-11-10
 
 ## 基本信息
 
@@ -16,6 +18,66 @@ IdeauraAdapter 是基于花枫咖啡馆（RockyChat）平台 API 构建的适配
 - 多账户支持：支持通过 Bot Token 配置多个账户
 - 链式修饰支持：支持 `.At()`、`.AtAll()`、`.Reply()`、`.Command()` 等链式修饰方法
 - OneBot12兼容：支持发送 OneBot12 格式消息
+
+## 标准化对齐（4.3.2）
+
+### 事件与账户
+
+1. **事件 `self.account_id` 注入**：所有事件携带产生它的账户名，多账户下 `event.reply()` 自动按该账户受理发送
+2. **账户配置新增 `bot_id` 可选字段**：`IdeauraAccountConfig` 支持 `bot_id`，用于显式指定账户对应的 Bot 用户 ID
+3. **好友申请事件补标准 `request_id`**：`friend_request` / `friend_event` 事件顶层新增 `request_id`（与 `ideaura_request_id` 同值），事件可用 `event.approve()` / `event.reject()` 审批
+
+好友申请处理示例：
+
+```python
+from ErisPulse.Core.Event import request
+
+@request.on_request()
+async def handle_friend_request(event):
+    if event.get("platform") != "ideaura":
+        return
+    # event["request_id"] 与 ideaura_request_id 同值
+    if event.get("detail_type") == "friend":
+        await event.approve()    # 同意好友申请
+    # await event.reject()       # 拒绝好友申请
+```
+
+接口约定遵循 SDK 标准：docs/zh-CN/standards/request-action-spec.md（请求与审批动作规范）。
+
+### 动作与错误码规范
+
+1. **标准动作名不再当 HTTP 路径转发**：`call_api` 传入未实现的标准动作名（如 `get_self_info`）时显式返回 10002，不再当作 HTTP 路径转发给平台；平台 HTTP 路径调用需使用 `/api/` 前缀
+2. 错误码已标准化（原 HTTP 状态码、`-1`、`34000` 等旧值全部清理）：
+
+| retcode | 说明 |
+|---------|------|
+| 0 | 成功 |
+| 33001 | 网络错误（请求异常、超时等） |
+| 34100 | 平台错误（原始响应保留在 `ideaura_raw` 字段） |
+| 10002 | 不支持的动作 / 消息段（未实现的标准动作、Face 表情段等） |
+
+### Send 规范
+
+- HTML 方法名为 `HTML`（`Html` 为保留别名）
+- `Face` 段返回 10002 错误结果（不再降级为纯文本发送），并输出 warning 日志
+- Raw_ob12 中未知消息段跳过并输出 warning；全部消息段均无法处理时返回 10002
+
+## v5 范式更新（4.1.0）
+
+- **BaseConverter 继承**：转换器公共字段由框架 build_base_event 构建
+- **spawn_background 任务归属**：账户连接任务改用 runtime.spawn_background
+- **框架软依赖**：运行时检测 ErisPulse>=2.7.1 并提示；启动输出版本日志
+- Request DSL 查询式接口（`Request(request_id)`）暂缓；好友申请审批已可通过事件 `event.approve()` / `event.reject()` 处理（见「标准化对齐（4.3.2）」）
+
+
+### 已对接平台能力
+
+- **事件**：消息编辑/撤回/转发/已读（ideaura_message_*）、好友申请（friend_request）、好友增删（friend_increase/decrease）、在线状态（friend_online/offline）
+- **发送**：Text / Image / Markdown / Raw_ob12（链式 Reply/At/AtAll 修饰）
+- **好友申请审批**：4.3.2 起通过事件 `event.approve()` / `event.reject()` 支持
+- **未对接**：Api DSL（平台 REST 面待开放后补充）、Request DSL 查询式接口
+
+---
 
 ## 支持的消息发送类型
 
@@ -33,9 +95,10 @@ await ideaura.Send.To("group", "chatroom").Text("Hello World!")
 - `.Video(file, filename: str = None)`：发送视频消息，支持 bytes/URL/本地路径。
 - `.File(file, filename: str = None)`：发送文件消息，支持 bytes/URL/本地路径。
 - `.Voice(file, filename: str = None)`：发送语音消息（作为文件发送）。
-- `.Face(face_id: str)`：发送表情（以纯文本形式发送 emoji）。
+- `.Face(face_id: str)`：发送表情（4.3.2 起**不受平台支持**，返回 retcode=10002 并跳过，不再降级为文本）。
 - `.Markdown(text: str)`：发送 Markdown 格式消息。
-- `.Html(html: str)`：发送 HTML 格式消息。
+- `.HTML(html: str)`：发送 HTML 格式消息（`Html` 为保留别名）。
+- `.MergeForward(nodes, title="合并聊天记录")`：发送合并转发消息（渲染为 `<details>` 折叠 HTML 卡片）。
 - `.Edit(message_id: str, text: str, content_type: str = "text")`：编辑已有消息。
 - `.Recall(message_id: str)`：撤回消息。
 
@@ -68,6 +131,9 @@ await ideaura.Send.To("group", "chatroom").Reply(msg_id).Text("回复消息")
 
 # 回复 + @
 await ideaura.Send.To("group", "chatroom").Reply(msg_id).At("456").Text("回复并@")
+
+# HTML 格式消息
+await ideaura.Send.To("group", "chatroom").HTML("<p>HTML 消息</p>")
 ```
 
 ### 发送到不同目标
@@ -99,6 +165,8 @@ ob12_msg = [{"type": "text", "data": {"text": "回复消息"}}]
 await ideaura.Send.To("group", "chatroom").Reply(msg_id).Raw_ob12(ob12_msg)
 ```
 
+> 未知消息段会被跳过并输出 warning 日志；若全部消息段均无法处理，返回 retcode=10002。
+
 ## 发送方法返回值
 
 所有发送方法均返回一个 Task 对象，可以直接 await 获取发送结果。返回结果遵循 ErisPulse 适配器标准化返回规范：
@@ -106,7 +174,7 @@ await ideaura.Send.To("group", "chatroom").Reply(msg_id).Raw_ob12(ob12_msg)
 ```python
 {
     "status": "ok",           // 执行状态
-    "retcode": 0,             // 返回码
+    "retcode": 0,             // 返回码（0 为成功，错误码见「标准化对齐（4.3.2）」）
     "data": {...},            // 响应数据
     "self": {...},            // 自身信息（包含 user_id）
     "message_id": "123456",   // 消息ID
@@ -134,10 +202,11 @@ await ideaura.Send.To("group", "chatroom").Reply(msg_id).Raw_ob12(ob12_msg)
     - 编辑标记段：ideaura_edited
     - Markdown消息段：ideaura_markdown
     - HTML消息段：ideaura_html
+    - Bot指令消息段：ideaura_command
 2. 扩展字段：
     - 所有特有字段均以 `ideaura_` 前缀标识
     - 保留原始数据在 `ideaura_raw` 字段
-    - `self.user_id` 表示当前账户的用户ID
+    - 事件 `self.user_id` 表示当前账户的用户ID，`self.account_id` 为账户名
 
 ### 消息编辑事件
 
@@ -239,6 +308,8 @@ await ideaura.Send.To("group", "chatroom").Reply(msg_id).Raw_ob12(ob12_msg)
 
 ### 好友请求事件
 
+4.3.2 起顶层新增标准 `request_id` 字段（与 `ideaura_request_id` 同值），可用 `event.approve()` / `event.reject()` 审批：
+
 ```python
 {
   "type": "request",
@@ -246,6 +317,7 @@ await ideaura.Send.To("group", "chatroom").Reply(msg_id).Raw_ob12(ob12_msg)
   "platform": "ideaura",
   "user_id": "请求者ID",
   "user_nickname": "请求者昵称",
+  "request_id": "请求ID",
   "ideaura_request_id": "请求ID",
   "ideaura_message": "验证消息"
 }
@@ -285,6 +357,23 @@ await ideaura.Send.To("group", "chatroom").Reply(msg_id).Raw_ob12(ob12_msg)
 | `forward_source_id` | string | 转发源消息ID |
 | `original_message_id` | string | 原始消息ID |
 
+### Bot 指令消息段 (ideaura_command)
+
+当用户触发 Bot 指令时，消息段类型为 `ideaura_command`：
+
+```json
+{
+  "type": "ideaura_command",
+  "data": {
+    "command_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `command_id` | string | 指令 UUID |
+
 ### 事件处理示例
 
 ```python
@@ -323,6 +412,38 @@ async def handle_notice(event):
         print(f"用户状态变更: {status}")
 ```
 
+## Event Mixin 扩展方法
+
+适配器注册了以下平台专有方法，仅在 `platform == "ideaura"` 时可用：
+
+| 方法 | 返回类型 | 说明 |
+|------|----------|------|
+| `get_source_type()` | `str` | 消息来源类型（`chatroom`/`topic`/`private`） |
+| `get_sender_name()` | `str` | 发送者昵称 |
+| `get_sender_avatar()` | `str` | 发送者头像 URL |
+| `is_sender_bot()` | `bool` | 发送者是否为机器人 |
+| `is_receiver_bot()` | `bool` | 接收者是否为机器人 |
+| `get_command_id()` | `str` | 触发的 Bot 指令 ID（若有，`ideaura_command_id`） |
+| `get_command()` | `str` | `get_command_id()` 的别名 |
+| `get_topic_name()` | `str` | 话题名称 |
+| `get_message_type()` | `str` | 消息类型（normal/edited/forwarded/quoted） |
+| `get_message_subtype()` | `str` | 消息子类型（text/image/video/file/markdown/html） |
+| `is_self_message()` | `bool` | 是否为自己发送的消息 |
+
+```python
+from ErisPulse.Core.Event import message
+
+@message.on_message()
+async def handle_message(event):
+    if event.get_platform() != "ideaura":
+        return
+
+    # 获取触发的 Bot 指令 ID（若有）
+    cmd_id = event.get_command_id()
+    if cmd_id:
+        print(f"收到指令: {cmd_id}")
+```
+
 ---
 
 ## 多账户配置
@@ -331,6 +452,7 @@ async def handle_notice(event):
 
 IdeauraAdapter 支持同时配置和运行多个账户，使用 **Bot Token** 认证。
 
+> [!WARNING]
 > 4.0.1 起**移除邮箱密码登录**，仅支持 Bot Token。Bot Token 需前往 [MSCPO 开放平台](https://open.mscpo.com/rockychat/bots) 获取（以 `bot-token-` 开头）。
 
 ```toml
@@ -338,11 +460,13 @@ IdeauraAdapter 支持同时配置和运行多个账户，使用 **Bot Token** �
 # 账户1
 [IdeauraAdapter.accounts.default]
 token = "bot-token-xxxxxx1"      # 机器人 API Token（必填）
+bot_id = ""                      # Bot 用户ID（可选，显式指定账户对应 Bot）
 enabled = true                   # 是否启用（可选，默认为true）
 
 # 账户2
 [IdeauraAdapter.accounts.bot2]
 token = "bot-token-xxxxxx2"
+bot_id = ""
 enabled = true
 
 # 可选：自定义服务器地址
@@ -354,6 +478,7 @@ heartbeat_interval = 30
 
 **配置项说明：**
 - `token`：机器人 API Token（必填，以 `bot-token-` 开头）
+- `bot_id`：Bot 用户ID（可选，4.3.2 起支持，用于显式指定账户对应 Bot）
 - `enabled`：是否启用该账户（可选，默认为true）
 
 **全局配置项：**
@@ -381,7 +506,7 @@ await ideaura.Send.To("user", "user123").Text("Hello from default account!")
 
 ### 事件中的账户标识
 
-接收到的事件会自动包含对应的账户信息：
+接收到的事件会自动包含对应的账户信息（4.3.2 起 `self.account_id` 为账户名）：
 
 ```python
 from ErisPulse.Core.Event import message
@@ -389,7 +514,7 @@ from ErisPulse.Core.Event import message
 @message.on_message()
 async def handle_message(event):
     if event["platform"] == "ideaura":
-        account_id = event["self"]["user_id"]
+        account_id = event["self"]["account_id"]
         print(f"消息来自账户: {account_id}")
 ```
 
@@ -399,7 +524,7 @@ async def handle_message(event):
 
 - 所有特有字段均以 `ideaura_` 前缀标识，避免与标准字段冲突
 - 保留原始数据在 `ideaura_raw` 字段，便于访问平台的完整原始数据
-- `self.user_id` 表示当前登录账户的用户ID
+- `self.user_id` 表示当前登录账户的用户ID，`self.account_id` 为账户名
 - `ideaura_source_type`：消息来源类型（`chatroom`/`topic`/`private`）
 - `ideaura_sender_name`：发送者昵称
 - `ideaura_sender_avatar`：发送者头像URL
@@ -438,5 +563,5 @@ async def handle_message(event):
 4. @全体（`AtAll()`）需要管理员权限
 5. 文件上传大小限制为 10MB
 6. 音频文件作为 `file` 子类型发送（平台不区分独立音频类型）
-7. 表情（`Face()`）以纯文本形式发送 emoji
+7. 表情（`Face()`）不受平台支持，返回 retcode=10002 并跳过（不再降级为纯文本）
 8. 程序退出时请调用 `shutdown()` 确保资源释放

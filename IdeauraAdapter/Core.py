@@ -25,7 +25,20 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "4.3.1"
+__version__ = "4.3.2"
+
+# api-action-spec.md §3 标准动作名：不得作为 HTTP 路径透传给平台
+_STANDARD_ACTION_NAMES = frozenset({
+    "send_message", "get_self_info", "get_user_info", "get_friend_list",
+    "get_group_info", "get_group_list", "get_group_member_info",
+    "get_group_member_list", "set_group_name", "leave_group",
+    "get_guild_info", "get_guild_list", "set_guild_name",
+    "get_guild_member_info", "get_guild_member_list", "leave_guild",
+    "get_channel_info", "get_channel_list", "set_channel_name",
+    "get_channel_member_info", "get_channel_member_list", "leave_channel",
+    "upload_file", "get_file", "get_latest_events",
+    "get_supported_actions", "get_status", "get_version",
+})
 
 # 软依赖的框架最低版本（运行时检测，仅提示不强制）
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
@@ -171,6 +184,14 @@ class IdeauraAccountConfig(BotAccountConfig):
             "ui": {"widget": "password", "group": "token", "order": 1},
         },
     )
+    bot_id: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": "机器人平台 ID（可选，不填则登录后自动获取）",
+            "required": False,
+            "ui": {"widget": "text", "group": "token", "order": 2},
+        },
+    )
 
     def has_valid_auth(self) -> bool:
         """账户是否提供了有效的 Bot Token"""
@@ -240,7 +261,14 @@ class IdeauraAdapter(BaseAdapter):
             return self.Raw_ob12([{"type": "file", "data": {"file": file, "filename": filename}}])
 
         def Face(self, face_id: str):
-            return self.Raw_ob12([{"type": "text", "data": {"text": face_id}}])
+            # Ideaura 无表情消息形态，跳过发送并告警
+            self._adapter.logger.warning(f"Face 段不支持，已跳过: {face_id}")
+            return asyncio.create_task(
+                self._return_error("Ideaura 不支持 Face 表情消息，已跳过")
+            )
+
+        async def _return_error(self, message: str):
+            return self._adapter.make_error(retcode=10002, message=message, raw=None)
 
         def Voice(self, file, filename: str = None):
             return self.Raw_ob12([{"type": "file", "data": {"file": file, "filename": filename}}])
@@ -248,8 +276,11 @@ class IdeauraAdapter(BaseAdapter):
         def Markdown(self, text: str):
             return self.Raw_ob12([{"type": "ideaura_markdown", "data": {"markdown": text}}])
 
-        def Html(self, html: str):
+        def HTML(self, html: str):
             return self.Raw_ob12([{"type": "ideaura_html", "data": {"html": html}}])
+
+        # Html 为旧名，保留为 HTML 的别名
+        Html = HTML
 
         def MergeForward(self, nodes, title: str = "合并聊天记录"):
             """发送合并转发消息（渲染为折叠 HTML 卡片，html 子类型发出）
@@ -375,8 +406,9 @@ class IdeauraAdapter(BaseAdapter):
             elif seg_type == "ideaura_html":
                 return await self._send_text(seg_data.get("html", ""), account_name, account, subtype="html")
             else:
-                text = str(seg_data)
-                return await self._send_text(text, account_name, account)
+                # 未知段类型跳过并告警，不再降级为文本
+                self._adapter.logger.warning(f"未支持的消息段类型，已跳过: {seg_type}")
+                return None
 
         def _build_endpoint_and_base_payload(self, account_name: str) -> tuple:
             ctx = self.send_context
@@ -802,6 +834,7 @@ class IdeauraAdapter(BaseAdapter):
 
             event = self.convert(payload_raw, state.get("user_id", ""))
             if event:
+                event["self"]["account_id"] = name
                 self.logger.debug(f"账户 {name} 事件: {json.dumps(event, ensure_ascii=False)[:500]}")
                 from ErisPulse.Core import adapter as adapter_mgr
                 await adapter_mgr.emit(event)
@@ -838,7 +871,9 @@ class IdeauraAdapter(BaseAdapter):
         self.logger.info("IdeauraAdapter 已关闭")
 
     async def call_api(self, endpoint: str, _account_id: str = None, method: str = None, **params):
-        account_name, account = self._resolve_account(_account_id)
+                # 标准字段 account_id 与旧名 _account_id 双兼容（ApiDSL.Using 传标准名）
+        account_id = params.pop("account_id", None) or _account_id
+        account_name, account = self._resolve_account(account_id)
         echo = params.pop("echo", None)
 
         try:
@@ -846,6 +881,13 @@ class IdeauraAdapter(BaseAdapter):
                 result = await self._api_edit_message(account_name, account, **params)
             elif endpoint == "delete_message":
                 result = await self._api_delete_message(account_name, account, **params)
+            elif endpoint in _STANDARD_ACTION_NAMES:
+                # 标准动作名不再当作 HTTP 路径转发给平台
+                result = self.make_error(
+                    retcode=10002,
+                    message=f"标准动作 {endpoint} 不受支持，请使用 Send DSL 或 /api/ 前缀的 HTTP 路径",
+                    raw=None,
+                )
             else:
                 api_path = endpoint if endpoint.startswith("/api/") else f"/api/{endpoint}"
                 http_method = method.upper() if method else ("GET" if not params else "POST")
@@ -908,7 +950,7 @@ class IdeauraAdapter(BaseAdapter):
             return self._standardize_response(raw, account_name)
         except Exception as e:
             self.logger.error(f"HTTP POST 失败 {endpoint}: {e}")
-            return self.make_error(retcode=33000, message=str(e), raw=None)
+            return self.make_error(retcode=33001, message=str(e), raw=None)
 
     async def _http_upload_and_send(
         self, endpoint: str, account_name: str, account: IdeauraAccountConfig,
@@ -939,7 +981,7 @@ class IdeauraAdapter(BaseAdapter):
             return self._standardize_response(raw, account_name)
         except Exception as e:
             self.logger.error(f"HTTP upload+send 失败 {endpoint}: {e}")
-            return self.make_error(retcode=33000, message=str(e), raw=None)
+            return self.make_error(retcode=33001, message=str(e), raw=None)
 
     async def _http_request(self, method: str, endpoint: str, account_name: str, account: IdeauraAccountConfig, params: Dict = None) -> Dict:
         cfg = self._get_global_config()
@@ -956,7 +998,7 @@ class IdeauraAdapter(BaseAdapter):
             return self._standardize_response(raw, account_name)
         except Exception as e:
             self.logger.error(f"HTTP {method} 失败 {endpoint}: {e}")
-            return self.make_error(retcode=33000, message=str(e), raw=None)
+            return self.make_error(retcode=33001, message=str(e), raw=None)
 
     async def _parse_response(self, resp) -> Dict:
         try:
@@ -972,7 +1014,7 @@ class IdeauraAdapter(BaseAdapter):
         state = self._get_state(account_name)
         if not isinstance(raw, dict):
             return self.make_error(
-                retcode=34000,
+                retcode=34100,
                 message=f"API 返回了意外格式: {type(raw)}",
                 raw=raw,
             )
@@ -992,7 +1034,7 @@ class IdeauraAdapter(BaseAdapter):
 
         response = self.make_response(
             status="ok" if is_ok else "failed",
-            retcode=0 if is_ok else (status_code if isinstance(status_code, int) and status_code else -1),
+            retcode=0 if is_ok else 34100,
             data=data,
             message_id=message_id,
             message="" if is_ok else raw.get("message", raw.get("msg", "")),

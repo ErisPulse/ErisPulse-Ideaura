@@ -389,6 +389,10 @@ class IdeauraConverter(BaseConverter):
             base_event["ideaura_requester_id"] = str(data.get("requesterId", ""))
             base_event["ideaura_requester_name"] = data.get("requesterName", "")
 
+        # 标准 request_id 字段与 ideaura_request_id 同值
+        if base_event.get("ideaura_request_id"):
+            base_event["request_id"] = base_event["ideaura_request_id"]
+
         return base_event
 
     def _handle_friend_event(self, event_type: str, data: Dict, base_event: Dict) -> Optional[Dict]:
@@ -435,6 +439,10 @@ class IdeauraConverter(BaseConverter):
             base_event["user_nickname"] = data.get("removerName", "")
             base_event["ideaura_removed_user_id"] = str(data.get("removedUserId", data.get("removedId", "")))
             base_event["ideaura_removed_user_name"] = data.get("removedUserName", data.get("removedName", ""))
+
+        # 标准 request_id 字段与 ideaura_request_id 同值
+        if base_event.get("ideaura_request_id"):
+            base_event["request_id"] = base_event["ideaura_request_id"]
 
         return base_event
 

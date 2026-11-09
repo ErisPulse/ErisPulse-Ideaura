@@ -1,6 +1,6 @@
 [project]
 name = "ErisPulse-Ideaura"
-version = "4.3.1"
+version = "4.3.2"
 description = "ErisPulse的花枫咖啡馆适配器"
 readme = "README.md"
 requires-python = ">=3.10"
